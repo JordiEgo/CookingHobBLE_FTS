@@ -1,0 +1,237 @@
+# File Transfer Service (FTS) — BLE Protocol
+
+**Version:** 1.1  
+**Date:** 2026-06-23  
+**Author:** Jordi Alvarez  
+
+---
+
+## 1. Overview
+
+The **File Transfer Service (FTS)** is a proprietary BLE service (128-bit UUID) that allows a BLE client (e.g. smartphone) to push binary files of up to **512 KB** to an ESP32 device. The file is stored in internal RAM (or PSRAM when enabled) and is intended to be forwarded afterwards over a secondary bus (CAN, UART, SPI, etc.) to system nodes.
+
+Typical use cases:
+- Transfer of `.hex` files for remote firmware update of secondary nodes.
+- Sending configuration tables to secondary devices.
+
+---
+
+## 2. UUID Identifiers
+
+| Element | UUID (128-bit) | Description |
+|---|---|---|
+| **FTS Service** | `FA000001-FDB8-11EE-BE56-0242AC120002` | Main service |
+| **FTS_CONTROL** | `FA000002-FDB8-11EE-BE56-0242AC120002` | Signalling and control channel |
+| **FTS_DATA** | `FA000003-FDB8-11EE-BE56-0242AC120002` | File data channel |
+| **FTS_STATUS** | `FA000004-FDB8-11EE-BE56-0242AC120002` | Real-time readable status |
+
+---
+
+## 3. Characteristics
+
+### 3.1 FTS_CONTROL — UUID `FA000002`
+
+| Property | Value |
+|---|---|
+| Properties | Write + Indicate |
+| Security | No encryption (extensible) |
+| Max write size | 28 bytes (CMD_START) |
+| Indication size | 26 bytes max (RESP_INFO) |
+
+**The client writes commands; the device responds with indications.**
+
+#### Commands (Client → Device) — Write field format:
+
+| Byte 0 (CMD) | Name | Payload | Total |
+|---|---|---|---|
+| `0x01` | `CMD_START` | `filename[16] + file_size[4 LE] + total_pkts[2 LE] + dest_node[1] + crc32_total[4 LE]` | 28 bytes |
+| `0x02` | `CMD_END` | `crc32_total[4 LE]` | 5 bytes |
+| `0x03` | `CMD_ABORT` | — | 1 byte |
+| `0x04` | `CMD_QUERY` | — | 1 byte |
+
+> **CMD_QUERY:** When the state is `RECEIVING`, the device replies with `RESP_ACK` (3 bytes, `next_expected_pkt`), used by the client as a Write-With-Response barrier to synchronise before `CMD_END`. In any other state, it replies with `RESP_INFO` (26 bytes) containing the current buffer metadata.
+
+**CMD_START field description:**
+- `filename[16]`: File name in ASCII, null-padded to 16 bytes.
+- `file_size[4]`: Total file size in bytes (Little Endian).
+- `total_pkts[2]`: Total number of DATA packets to be sent (Little Endian).
+- `dest_node[1]`: Destination node identifier on the secondary bus.
+- `crc32_total[4]`: CRC-32/ISO-HDLC of the full file (poly=0xEDB88320, init=0xFFFFFFFF, xorout=0xFFFFFFFF).
+
+> **Buffer reuse:** If a new `CMD_START` arrives while the state is `DONE`, `ERROR`, or `RECEIVING`, the previous buffer is freed automatically and a new transfer begins. Only one file can reside in RAM at a time.
+
+#### Responses (Device → Client) — Indication format:
+
+| Byte 0 (RESP) | Name | Payload | Total |
+|---|---|---|---|
+| `0x81` | `RESP_READY` | `next_expected_pkt[2 LE]` | 3 bytes |
+| `0x82` | `RESP_ACK` | `next_expected_pkt[2 LE]` | 3 bytes |
+| `0x83` | `RESP_NACK` | `expected_pkt[2 LE] + error_code[1]` | 4 bytes |
+| `0x84` | `RESP_COMPLETE` | `crc_match[1]` | 2 bytes |
+| `0x85` | `RESP_ERROR` | `error_code[1]` — or `error_code[1] + max_free_heap[4 LE]` when error is `ALLOC (0x04)` | 2 or 6 bytes |
+| `0x86` | `RESP_INFO` | `state[1] + file_size[4 LE] + bytes_received[4 LE] + filename[16] + dest_node[1]` | 27 bytes |
+
+---
+
+### 3.2 FTS_DATA — UUID `FA000003`
+
+| Property | Value |
+|---|---|
+| Properties | **Write Without Response** |
+| Security | No encryption |
+| Useful payload per packet | `MTU - 3 - 4` ≈ 240 bytes with DLE (MTU=247) |
+
+**Maximises throughput.** Reliability is managed by the control protocol (ACK/NACK per window).
+
+#### Data packet format:
+
+```
+┌──────────────────┬──────────────────┬────────────────────────────────┐
+│  seq_num [2 LE]  │ crc16_pkt [2 LE] │       payload [N bytes]        │
+└──────────────────┴──────────────────┴────────────────────────────────┘
+```
+
+- `seq_num`: Packet sequence number (0-based, Little Endian).
+- `crc16_pkt`: CRC-16/CCITT-FALSE of the `payload` field only.
+- `payload`: Binary file data for this packet.
+
+**The payload is written into the buffer at offset** `seq_num × payload_size`.
+
+---
+
+### 3.3 FTS_STATUS — UUID `FA000004`
+
+| Property | Value |
+|---|---|
+| Properties | Read + Notify |
+| Security | No encryption |
+| Size | 10 bytes |
+
+```c
+typedef struct {
+    uint8_t  state;            // 0=IDLE 1=RECEIVING 2=VERIFYING 3=DONE 4=ERROR
+    uint16_t received_pkts;    // Packets received (LE)
+    uint16_t total_pkts;       // Total expected (LE)
+    uint32_t bytes_received;   // Accumulated bytes (LE)
+    uint8_t  last_error;       // Last error code
+} __attribute__((packed)) fts_status_t;   // 10 bytes
+```
+
+---
+
+## 4. Communication Flow
+
+### 4.1 Normal transfer (window of 20 packets)
+
+```
+Client (smartphone)                     ESP32
+        │                                 │
+        │── CMD_START (28 bytes) ────────►│  allocates buffer (heap / PSRAM)
+        │                                 │  initialises context
+        │◄── RESP_READY (pkt=0) ──────────│  ready to receive
+        │                                 │
+        │── DATA pkt#0  ────────────────►│
+        │── DATA pkt#1  ────────────────►│  (window = 20 packets)
+        │── ...                           │
+        │── DATA pkt#19 ────────────────►│
+        │                                 │  verifies CRC16 of each packet
+        │◄── RESP_ACK (pkt=20) ───────────│  checkpoint, continues
+        │                                 │
+        │── DATA pkt#20 ────────────────►│
+        │   ...                           │
+        │── DATA pkt#N-1 ───────────────►│
+        │                                 │
+        │◄── RESP_ACK final (pkt=N) ──────│  all bytes received
+        │                                 │  (guarantee before CMD_END)
+        │── CMD_END (crc32) ────────────►│  verifies global CRC-32
+        │◄── RESP_COMPLETE (crc_ok=1) ───│  file available in RAM
+        │                                 │
+```
+
+> **Race condition avoided:** The client waits for the final `RESP_ACK` before sending `CMD_END`. This guarantees that `CMD_END` (Write-With-Response) does not overtake the last DATA packets (Write-Without-Response) in the BLE controller TX queue.
+
+### 4.2 Error and retransmission
+
+```
+        │── DATA pkt#5 (corruption) ─────►│  CRC16 fails
+        │   ...full window...              │
+        │◄── RESP_NACK (pkt=5, err=0x01) ─│
+        │                                  │
+        │── DATA pkt#5 (retransmission) ──►│
+        │── DATA pkt#6 ──────────────────►│
+        │   ...                            │
+```
+
+### 4.3 Abort
+
+```
+        │── CMD_ABORT ────────────────────►│  frees buffer, returns to IDLE
+        │◄── RESP_READY (pkt=0) ───────────│
+```
+
+### 4.4 Buffer status query (CMD_QUERY)
+
+```
+Client (smartphone)                     ESP32
+        │                                 │
+        │── CMD_QUERY (1 byte, WWR) ──────►│
+        │                                 │
+        │   If state == RECEIVING:         │
+        │◄── RESP_ACK (next_pkt[2]) ───────│
+        │                                 │
+        │   If state != RECEIVING:         │
+        │◄── RESP_INFO (26 bytes) ─────────│
+        │     [state, file_size(4 LE),     │
+        │      bytes_recv(4 LE),           │
+        │      filename(16),               │
+        │      dest_node(1)]               │
+        │                                 │
+```
+
+> **Typical use:** Allows the HTML client to verify which file is currently in RAM and whether the transfer completed successfully, without subscribing to status notifications.
+
+---
+
+## 5. Error Codes
+
+| Code | Name | Description |
+|---|---|---|
+| `0x00` | `FTS_ERR_NONE` | No error |
+| `0x01` | `FTS_ERR_CRC_PKT` | CRC-16 mismatch on received packet |
+| `0x02` | `FTS_ERR_CRC_FILE` | Global CRC-32 mismatch |
+| `0x03` | `FTS_ERR_OUT_OF_SEQ` | Unexpected sequence number |
+| `0x04` | `FTS_ERR_ALLOC` | Memory allocation failure |
+| `0x05` | `FTS_ERR_SIZE` | File exceeds the 512 KB limit |
+| `0x06` | `FTS_ERR_BAD_STATE` | Command not valid in current state |
+| `0x07` | `FTS_ERR_TIMEOUT` | (reserved for future implementation) |
+
+---
+
+## 6. Design Parameters
+
+| Parameter | Value |
+|---|---|
+| Maximum file size | **512 KB** |
+| Storage | Dynamic heap; PSRAM if `CONFIG_SPIRAM` is enabled |
+| ACK window size | **20 packets** |
+| Per-packet CRC | CRC-16/CCITT-FALSE (poly=0x1021, init=0xFFFF, no reflection) |
+| Full-file CRC | CRC-32/ISO-HDLC — software implementation (poly=0xEDB88320, init=0xFFFFFFFF, xorout=0xFFFFFFFF) |
+| Recommended MTU | 247 bytes (BLE 4.2+ DLE) |
+| Useful payload per packet | `≤ MTU - 3 - 4` bytes (`≤ 240` bytes with MTU=247) |
+| Status notification | After CMD_START, each RESP_ACK, and at CMD_END |
+
+> **PSRAM note:** Without PSRAM enabled (`CONFIG_SPIRAM` undefined), the runtime heap has ~50–60 KB free. For files ≥ 64 KB, enabling PSRAM is recommended.
+
+---
+
+## 7. Implementation Notes
+
+- The received file is available via `fts_get_file_buffer()` / `fts_get_file_size()` for the application layer.
+- Call `fts_release_buffer()` once the secondary bus has consumed the file.
+- If PSRAM is not enabled (`CONFIG_SPIRAM` undefined), `malloc()` is used from the internal heap.
+- FTS_DATA uses **Write Without Response** to maximise throughput; flow control is handled by the windowed ACK/NACK protocol over FTS_CONTROL.
+- The global CRC-32 uses a software implementation (`crc32_iso_hdlc`) instead of `esp_rom_crc32_le` because the ROM calling convention varies across ESP32 revisions and produces incorrect results with the standard polynomial.
+- Only **one file resides in RAM at a time**. A new `CMD_START` frees the previous buffer automatically.
+- The client must wait for the `RESP_ACK` indication before sending the next window.
+- The service does not require pairing/encryption; this can be added by modifying the flags in `gatt_svcs[]`.
+

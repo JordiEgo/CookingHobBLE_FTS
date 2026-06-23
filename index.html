@@ -1,237 +1,829 @@
-# File Transfer Service (FTS) — BLE Protocol
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTS — BLE File Transfer Client</title>
+    <style>
+        :root {
+            --bg:      #0d1117;
+            --surface: #161b22;
+            --card:    #1c2128;
+            --border:  #30363d;
+            --text:    #e6edf3;
+            --muted:   #7d8590;
+            --accent:  #00b4d8;
+            --success: #3fb950;
+            --warning: #d29922;
+            --error:   #f85149;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
 
-**Version:** 1.1  
-**Date:** 2026-06-23  
-**Author:** Jordi Alvarez  
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 1.5rem 1rem;
+        }
 
----
+        .header { text-align: center; margin-bottom: 2rem; }
+        .header h1 { font-size: 1.7rem; color: var(--accent); letter-spacing: -0.02em; }
+        .header p  { color: var(--muted); font-size: 0.82rem; margin-top: 0.3rem; }
 
-## 1. Overview
+        .layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            max-width: 920px;
+            margin: 0 auto;
+        }
+        @media (max-width: 640px) { .layout { grid-template-columns: 1fr; } }
 
-The **File Transfer Service (FTS)** is a proprietary BLE service (128-bit UUID) that allows a BLE client (e.g. smartphone) to push binary files of up to **512 KB** to an ESP32 device. The file is stored in internal RAM (or PSRAM when enabled) and is intended to be forwarded afterwards over a secondary bus (CAN, UART, SPI, etc.) to system nodes.
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.1rem 1.25rem;
+        }
+        .card.span2 { grid-column: 1 / -1; }
 
-Typical use cases:
-- Transfer of `.hex` files for remote firmware update of secondary nodes.
-- Sending configuration tables to secondary devices.
+        .card-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--muted);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
 
----
+        /* Badge */
+        .badge {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+        }
+        .badge-off  { background: rgba(248,81,73,.15); color: var(--error); }
+        .badge-on   { background: rgba(63,185,80,.15); color: var(--success); }
+        .badge-busy { background: rgba(210,153,34,.15); color: var(--warning); }
 
-## 2. UUID Identifiers
+        /* Buttons */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            padding: 0.55rem 1.1rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: filter .15s, transform .1s;
+            white-space: nowrap;
+        }
+        .btn:hover:not(:disabled) { filter: brightness(1.12); transform: translateY(-1px); }
+        .btn:active:not(:disabled) { transform: translateY(0); }
+        .btn:disabled { opacity: .35; cursor: not-allowed; }
+        .btn-accent   { background: var(--accent);  color: #000; }
+        .btn-danger   { background: var(--error);   color: #fff; }
+        .btn-ghost    { background: var(--card);    color: var(--text); border: 1px solid var(--border); }
+        .btn-sm       { padding: .35rem .75rem; font-size: .78rem; }
 
-| Element | UUID (128-bit) | Description |
-|---|---|---|
-| **FTS Service** | `FA000001-FDB8-11EE-BE56-0242AC120002` | Main service |
-| **FTS_CONTROL** | `FA000002-FDB8-11EE-BE56-0242AC120002` | Signalling and control channel |
-| **FTS_DATA** | `FA000003-FDB8-11EE-BE56-0242AC120002` | File data channel |
-| **FTS_STATUS** | `FA000004-FDB8-11EE-BE56-0242AC120002` | Real-time readable status |
+        /* Form */
+        .fgroup { margin-bottom: .85rem; }
+        .fgroup:last-child { margin-bottom: 0; }
+        label { display: block; font-size: .75rem; color: var(--muted); margin-bottom: .3rem; }
+        input[type=number] {
+            width: 100%;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: .45rem .7rem;
+            color: var(--text);
+            font-size: .88rem;
+        }
+        input[type=number]:focus { outline: none; border-color: var(--accent); }
+        .row { display: flex; gap: .75rem; }
+        .row .fgroup { flex: 1; margin-bottom: 0; }
 
----
+        /* File drop */
+        .drop-zone {
+            border: 2px dashed var(--border);
+            border-radius: 10px;
+            padding: 1.5rem 1rem;
+            text-align: center;
+            cursor: pointer;
+            position: relative;
+            transition: border-color .2s, background .2s;
+        }
+        .drop-zone:hover, .drop-zone.over {
+            border-color: var(--accent);
+            background: rgba(0,180,216,.05);
+        }
+        .drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+        .drop-icon { font-size: 2.2rem; margin-bottom: .5rem; }
+        .drop-hint { color: var(--muted); font-size: .82rem; line-height: 1.5; }
+        .drop-file { color: var(--accent); font-weight: 600; font-size: .9rem; margin-top: .5rem; }
 
-## 3. Characteristics
+        /* Progress */
+        .progress-wrap { margin: .75rem 0 .3rem; }
+        .progress-bar  { height: 8px; background: var(--card); border-radius: 999px; overflow: hidden; }
+        .progress-fill {
+            height: 100%; border-radius: 999px; width: 0%;
+            background: linear-gradient(90deg, var(--accent), #90e0ef);
+            transition: width .25s ease;
+        }
+        .progress-fill.ok  { background: var(--success); }
+        .progress-fill.err { background: var(--error); }
+        .progress-meta { display: flex; justify-content: space-between; font-size: .75rem; color: var(--muted); margin-top: .3rem; }
 
-### 3.1 FTS_CONTROL — UUID `FA000002`
+        /* Stats */
+        .stats { display: grid; grid-template-columns: repeat(3,1fr); gap: .65rem; margin-top: .85rem; }
+        .stat  { background: var(--card); border-radius: 8px; padding: .55rem; text-align: center; }
+        .stat-val { font-size: 1.15rem; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+        .stat-lbl { font-size: .68rem; color: var(--muted); margin-top: .15rem; }
 
-| Property | Value |
-|---|---|
-| Properties | Write + Indicate |
-| Security | No encryption (extensible) |
-| Max write size | 28 bytes (CMD_START) |
-| Indication size | 26 bytes max (RESP_INFO) |
+        /* Log */
+        .log {
+            background: #010409;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: .65rem .8rem;
+            height: 190px;
+            overflow-y: auto;
+            font-family: 'Cascadia Code', 'Consolas', 'Monaco', monospace;
+            font-size: .76rem;
+            line-height: 1.55;
+        }
+        .log::-webkit-scrollbar { width: 6px; }
+        .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        .le { }
+        .li { color: var(--text); }
+        .lok { color: var(--success); }
+        .lw  { color: var(--warning); }
+        .le  { color: var(--error); }
+        .lm  { color: var(--muted); }
 
-**The client writes commands; the device responds with indications.**
+        /* Inline row */
+        .inline { display: flex; align-items: center; gap: .7rem; margin-bottom: .85rem; flex-wrap: wrap; }
+        .device-name { font-size: .9rem; color: var(--text); flex: 1; min-width: 0;
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-#### Commands (Client → Device) — Write field format:
+        /* Alert */
+        .alert { padding: .55rem .8rem; border-radius: 7px; font-size: .78rem; margin-top: .75rem; line-height: 1.5; }
+        .alert-w { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.4); color: var(--warning); }
+        .alert-i { background: rgba(0,180,216,.1);  border: 1px solid rgba(0,180,216,.4);  color: var(--accent); }
+    </style>
+</head>
+<body>
 
-| Byte 0 (CMD) | Name | Payload | Total |
-|---|---|---|---|
-| `0x01` | `CMD_START` | `filename[16] + file_size[4 LE] + total_pkts[2 LE] + dest_node[1] + crc32_total[4 LE]` | 28 bytes |
-| `0x02` | `CMD_END` | `crc32_total[4 LE]` | 5 bytes |
-| `0x03` | `CMD_ABORT` | — | 1 byte |
-| `0x04` | `CMD_QUERY` | — | 1 byte |
+<div class="header">
+    <h1>FTS — BLE File Transfer</h1>
+    <p>File Transfer Service v1.0 &nbsp;·&nbsp; Requires Chrome / Edge with Web Bluetooth API enabled</p>
+</div>
 
-> **CMD_QUERY:** When the state is `RECEIVING`, the device replies with `RESP_ACK` (3 bytes, `next_expected_pkt`), used by the client as a Write-With-Response barrier to synchronise before `CMD_END`. In any other state, it replies with `RESP_INFO` (26 bytes) containing the current buffer metadata.
+<div class="layout">
 
-**CMD_START field description:**
-- `filename[16]`: File name in ASCII, null-padded to 16 bytes.
-- `file_size[4]`: Total file size in bytes (Little Endian).
-- `total_pkts[2]`: Total number of DATA packets to be sent (Little Endian).
-- `dest_node[1]`: Destination node identifier on the secondary bus.
-- `crc32_total[4]`: CRC-32/ISO-HDLC of the full file (poly=0xEDB88320, init=0xFFFFFFFF, xorout=0xFFFFFFFF).
+    <!-- ── Conexión ─────────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-title">
+            Connection
+            <span id="badge" class="badge badge-off">Disconnected</span>
+        </div>
+        <div class="inline">
+            <div class="device-name" id="device-name">—</div>
+        </div>
+        <div style="display:flex;gap:.65rem;flex-wrap:wrap;">
+            <button class="btn btn-accent" id="btn-connect">&#x1F517; Connect</button>
+            <button class="btn btn-ghost"  id="btn-disconnect" disabled>Disconnect</button>
+            <button class="btn btn-ghost btn-sm" id="btn-query" disabled>&#x1F50D; Query</button>
+        </div>
+    </div>
 
-> **Buffer reuse:** If a new `CMD_START` arrives while the state is `DONE`, `ERROR`, or `RECEIVING`, the previous buffer is freed automatically and a new transfer begins. Only one file can reside in RAM at a time.
+    <!-- ── Configuración ────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-title">&#x2699;&#xFE0F; Settings</div>
+        <div class="row">
+            <div class="fgroup">
+                <label>Destination node (0–255)</label>
+                <input type="number" id="dest-node" value="1" min="0" max="255">
+            </div>
+            <div class="fgroup">
+                <label>Payload per packet (bytes)</label>
+                <input type="number" id="payload-size" value="240" min="16" max="244">
+            </div>
+        </div>
+        <div class="fgroup" style="margin-top:.85rem;">
+            <label>Inter-packet delay (ms) — increase if packet loss occurs</label>
+            <input type="number" id="pkt-delay" value="5" min="0" max="100">
+        </div>
+        <div class="alert alert-i">
+            &#x1F4A1; Payload 240 B requires DLE (MTU 247). If repeated NACKs occur, try 20 B.
+        </div>
+    </div>
 
-#### Responses (Device → Client) — Indication format:
+    <!-- ── Fichero ───────────────────────────────────────────── -->
+    <div class="card span2">
+        <div class="card-title">&#x1F4C1; File to Transfer</div>
+        <div class="drop-zone" id="drop-zone">
+            <input type="file" id="file-input" accept=".hex,.bin,.fw,.img,.srec">
+            <div class="drop-icon">&#x1F4C2;</div>
+            <div class="drop-hint">
+                Drag a file here or click to select<br>
+                <small>Formats: .hex · .bin · .fw · .img · .srec &nbsp;|&nbsp; Maximum: 512 KB</small>
+            </div>
+            <div class="drop-file" id="file-info"></div>
+        </div>
+    </div>
 
-| Byte 0 (RESP) | Name | Payload | Total |
-|---|---|---|---|
-| `0x81` | `RESP_READY` | `next_expected_pkt[2 LE]` | 3 bytes |
-| `0x82` | `RESP_ACK` | `next_expected_pkt[2 LE]` | 3 bytes |
-| `0x83` | `RESP_NACK` | `expected_pkt[2 LE] + error_code[1]` | 4 bytes |
-| `0x84` | `RESP_COMPLETE` | `crc_match[1]` | 2 bytes |
-| `0x85` | `RESP_ERROR` | `error_code[1]` — or `error_code[1] + max_free_heap[4 LE]` when error is `ALLOC (0x04)` | 2 or 6 bytes |
-| `0x86` | `RESP_INFO` | `state[1] + file_size[4 LE] + bytes_received[4 LE] + filename[16] + dest_node[1]` | 27 bytes |
+    <!-- ── Transferencia ────────────────────────────────────── -->
+    <div class="card span2">
+        <div class="card-title">Transfer</div>
+        <div style="display:flex;gap:.65rem;margin-bottom:.85rem;flex-wrap:wrap;">
+            <button class="btn btn-accent" id="btn-send"  disabled>&#x25B6; Start</button>
+            <button class="btn btn-danger btn-sm" id="btn-abort" disabled>&#x23F9; Abort</button>
+        </div>
 
----
+        <div class="progress-wrap">
+            <div class="progress-bar"><div class="progress-fill" id="prog-fill"></div></div>
+            <div class="progress-meta">
+                <span id="prog-pct">0 %</span>
+                <span id="prog-status">—</span>
+            </div>
+        </div>
 
-### 3.2 FTS_DATA — UUID `FA000003`
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-val" id="stat-pkts">—</div>
+                <div class="stat-lbl">Packets</div>
+            </div>
+            <div class="stat">
+                <div class="stat-val" id="stat-bytes">—</div>
+                <div class="stat-lbl">Bytes received</div>
+            </div>
+            <div class="stat">
+                <div class="stat-val" id="stat-retries">0</div>
+                <div class="stat-lbl">Retransmissions</div>
+            </div>
+        </div>
+    </div>
 
-| Property | Value |
-|---|---|
-| Properties | **Write Without Response** |
-| Security | No encryption |
-| Useful payload per packet | `MTU - 3 - 4` ≈ 240 bytes with DLE (MTU=247) |
+    <!-- ── Log ──────────────────────────────────────────────── -->
+    <div class="card span2">
+        <div class="card-title" style="justify-content:space-between;">
+            <span>&#x1F5A5;&#xFE0F; Log</span>
+            <button class="btn btn-ghost btn-sm" id="btn-clear">Clear</button>
+        </div>
+        <div class="log" id="log"></div>
+    </div>
 
-**Maximises throughput.** Reliability is managed by the control protocol (ACK/NACK per window).
+</div><!-- /layout -->
 
-#### Data packet format:
+<script>
+'use strict';
 
-```
-┌──────────────────┬──────────────────┬────────────────────────────────┐
-│  seq_num [2 LE]  │ crc16_pkt [2 LE] │       payload [N bytes]        │
-└──────────────────┴──────────────────┴────────────────────────────────┘
-```
+// ── UUIDs del servicio FTS ────────────────────────────────────────────────────
+const FTS_SVC_UUID  = 'fa000001-fdb8-11ee-be56-0242ac120002';
+const FTS_CTRL_UUID = 'fa000002-fdb8-11ee-be56-0242ac120002';
+const FTS_DATA_UUID = 'fa000003-fdb8-11ee-be56-0242ac120002';
+const FTS_STAT_UUID = 'fa000004-fdb8-11ee-be56-0242ac120002';
 
-- `seq_num`: Packet sequence number (0-based, Little Endian).
-- `crc16_pkt`: CRC-16/CCITT-FALSE of the `payload` field only.
-- `payload`: Binary file data for this packet.
+// ── Constantes de protocolo ───────────────────────────────────────────────────
+const CMD_START     = 0x01;
+const CMD_END       = 0x02;
+const CMD_ABORT     = 0x03;
+const CMD_QUERY     = 0x04;
+const RESP_READY    = 0x81;
+const RESP_ACK      = 0x82;
+const RESP_NACK     = 0x83;
+const RESP_COMPLETE = 0x84;
+const RESP_ERROR    = 0x85;
+const WINDOW_SIZE   = 20;
+const MAX_FILE_BYTES = 512 * 1024;
 
-**The payload is written into the buffer at offset** `seq_num × payload_size`.
+const ERR_NAME = {
+    0x00:'OK', 0x01:'CRC_PKT', 0x02:'CRC_FILE',
+    0x03:'OUT_OF_SEQ', 0x04:'ALLOC', 0x05:'SIZE', 0x06:'BAD_STATE'
+};
+const RESP_INFO  = 0x86;
+const STATE_NAME = { 0:'IDLE', 1:'RECEIVING', 2:'VERIFYING', 3:'DONE', 4:'ERROR' };
 
----
+// ── Estado global ─────────────────────────────────────────────────────────────
+let bleDevice   = null;
+let ctrlChar    = null;
+let dataChar    = null;
+let statChar    = null;
+let fileBuffer  = null;   // ArrayBuffer
+let fileName    = '';
+let txActive    = false;
+let retries     = 0;
 
-### 3.3 FTS_STATUS — UUID `FA000004`
+// Resolvers para respuestas de control (promise-based)
+let ctrlResolve  = null;
+let ctrlReject   = null;
+let ctrlTimer    = null;
+let ctrlExpected = [];
 
-| Property | Value |
-|---|---|
-| Properties | Read + Notify |
-| Security | No encryption |
-| Size | 10 bytes |
+// ── CRC-32/ISO-HDLC (= Ethernet/ZIP, poly reflej. 0xEDB88320) ─────────────
+// Coincide con: esp_rom_crc32_le(0xFFFFFFFF, buf, len) ^ 0xFFFFFFFF
+const CRC32 = (() => {
+    const T = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        T[i] = c;
+    }
+    return T;
+})();
 
-```c
-typedef struct {
-    uint8_t  state;            // 0=IDLE 1=RECEIVING 2=VERIFYING 3=DONE 4=ERROR
-    uint16_t received_pkts;    // Packets received (LE)
-    uint16_t total_pkts;       // Total expected (LE)
-    uint32_t bytes_received;   // Accumulated bytes (LE)
-    uint8_t  last_error;       // Last error code
-} __attribute__((packed)) fts_status_t;   // 10 bytes
-```
+function crc32(data) {
+    const b = new Uint8Array(data);
+    let c = 0xFFFFFFFF;
+    for (const x of b) c = CRC32[(c ^ x) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+}
 
----
+// ── CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, sin reflexión) ─────────────
+function crc16(data) {
+    let c = 0xFFFF;
+    for (const b of data) {
+        c ^= (b << 8) & 0xFFFF;
+        for (let i = 0; i < 8; i++)
+            c = (c & 0x8000) ? (((c << 1) ^ 0x1021) & 0xFFFF) : ((c << 1) & 0xFFFF);
+    }
+    return c;
+}
 
-## 4. Communication Flow
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-### 4.1 Normal transfer (window of 20 packets)
+function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+}
 
-```
-Client (smartphone)                     ESP32
-        │                                 │
-        │── CMD_START (28 bytes) ────────►│  allocates buffer (heap / PSRAM)
-        │                                 │  initialises context
-        │◄── RESP_READY (pkt=0) ──────────│  ready to receive
-        │                                 │
-        │── DATA pkt#0  ────────────────►│
-        │── DATA pkt#1  ────────────────►│  (window = 20 packets)
-        │── ...                           │
-        │── DATA pkt#19 ────────────────►│
-        │                                 │  verifies CRC16 of each packet
-        │◄── RESP_ACK (pkt=20) ───────────│  checkpoint, continues
-        │                                 │
-        │── DATA pkt#20 ────────────────►│
-        │   ...                           │
-        │── DATA pkt#N-1 ───────────────►│
-        │                                 │
-        │◄── RESP_ACK final (pkt=N) ──────│  all bytes received
-        │                                 │  (guarantee before CMD_END)
-        │── CMD_END (crc32) ────────────►│  verifies global CRC-32
-        │◄── RESP_COMPLETE (crc_ok=1) ───│  file available in RAM
-        │                                 │
-```
+function ts() {
+    const d = new Date();
+    return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
 
-> **Race condition avoided:** The client waits for the final `RESP_ACK` before sending `CMD_END`. This guarantees that `CMD_END` (Write-With-Response) does not overtake the last DATA packets (Write-Without-Response) in the BLE controller TX queue.
+// ── Log ──────────────────────────────────────────────────────────────────────
+function log(msg, cls = 'li') {
+    const el   = document.getElementById('log');
+    const line = document.createElement('div');
+    line.className = cls;
+    line.textContent = `[${ts()}] ${msg}`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+}
 
-### 4.2 Error and retransmission
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function setStatus(text, kind = '') {
+    const el = document.getElementById('prog-status');
+    el.textContent = text;
+    el.style.color = kind === 'ok'   ? 'var(--success)' :
+                     kind === 'err'  ? 'var(--error)'   :
+                     kind === 'warn' ? 'var(--warning)'  : 'var(--muted)';
+}
 
-```
-        │── DATA pkt#5 (corruption) ─────►│  CRC16 fails
-        │   ...full window...              │
-        │◄── RESP_NACK (pkt=5, err=0x01) ─│
-        │                                  │
-        │── DATA pkt#5 (retransmission) ──►│
-        │── DATA pkt#6 ──────────────────►│
-        │   ...                            │
-```
+function setProgress(pct, cls = '') {
+    const fill = document.getElementById('prog-fill');
+    fill.style.width  = Math.min(pct, 100).toFixed(1) + '%';
+    fill.className    = 'progress-fill' + (cls ? ' ' + cls : '');
+    document.getElementById('prog-pct').textContent = Math.min(pct, 100).toFixed(1) + ' %';
+}
 
-### 4.3 Abort
+function updStats(rxPkts, totPkts, rxBytes) {
+    document.getElementById('stat-pkts').textContent =
+        totPkts ? `${rxPkts} / ${totPkts}` : (rxPkts !== undefined ? rxPkts : '—');
+    document.getElementById('stat-bytes').textContent  = rxBytes ? fmtBytes(rxBytes) : '—';
+    document.getElementById('stat-retries').textContent = retries;
+}
 
-```
-        │── CMD_ABORT ────────────────────►│  frees buffer, returns to IDLE
-        │◄── RESP_READY (pkt=0) ───────────│
-```
+function setBadge(state) {
+    const el = document.getElementById('badge');
+    if (state === 'on')   { el.textContent = 'Connected';    el.className = 'badge badge-on'; }
+    if (state === 'off')  { el.textContent = 'Disconnected'; el.className = 'badge badge-off'; }
+    if (state === 'busy') { el.textContent = 'Transferring';  el.className = 'badge badge-busy'; }
+}
 
-### 4.4 Buffer status query (CMD_QUERY)
+function refreshSendBtn() {
+    document.getElementById('btn-send').disabled  = !(ctrlChar && fileBuffer && !txActive);
+    document.getElementById('btn-query').disabled = !(ctrlChar && !txActive);
+}
 
-```
-Client (smartphone)                     ESP32
-        │                                 │
-        │── CMD_QUERY (1 byte, WWR) ──────►│
-        │                                 │
-        │   If state == RECEIVING:         │
-        │◄── RESP_ACK (next_pkt[2]) ───────│
-        │                                 │
-        │   If state != RECEIVING:         │
-        │◄── RESP_INFO (26 bytes) ─────────│
-        │     [state, file_size(4 LE),     │
-        │      bytes_recv(4 LE),           │
-        │      filename(16),               │
-        │      dest_node(1)]               │
-        │                                 │
-```
+// ── Manejador de indicaciones de FTS_CONTROL ──────────────────────────────────
+function onCtrlChanged(evt) {
+    const dv   = evt.target.value;
+    const resp = dv.getUint8(0);
+    const name = { 0x81:'READY', 0x82:'ACK', 0x83:'NACK',
+                   0x84:'COMPLETE', 0x85:'ERROR', 0x86:'INFO' }[resp] || `0x${resp.toString(16)}`;
 
-> **Typical use:** Allows the HTML client to verify which file is currently in RAM and whether the transfer completed successfully, without subscribing to status notifications.
+    log(`◄ CTRL: ${name}`, 'lm');
 
----
+    if (!ctrlResolve) return;
 
-## 5. Error Codes
+    if (ctrlExpected.includes(resp)) {
+        clearTimeout(ctrlTimer);
+        const res = ctrlResolve;
+        ctrlResolve = null; ctrlReject = null;
+        res({ resp, dv });
+    } else if (resp === RESP_ERROR) {
+        clearTimeout(ctrlTimer);
+        const errCode = dv.byteLength > 1 ? dv.getUint8(1) : 0xFF;
+        let msg = `FTS_ERROR ${ERR_NAME[errCode] || '0x' + errCode.toString(16)}`;
+        if (errCode === 0x04 && dv.byteLength >= 6) {
+            const freeBytes = dv.getUint32(2, true);
+            msg += ` — device RAM available: ${fmtBytes(freeBytes)}`;
+        }
+        const rej = ctrlReject;
+        ctrlResolve = null; ctrlReject = null;
+        rej(new Error(msg));
+    }
+    // Respuestas inesperadas (ej. ACK residual mientras esperamos COMPLETE) → ignorar
+}
 
-| Code | Name | Description |
-|---|---|---|
-| `0x00` | `FTS_ERR_NONE` | No error |
-| `0x01` | `FTS_ERR_CRC_PKT` | CRC-16 mismatch on received packet |
-| `0x02` | `FTS_ERR_CRC_FILE` | Global CRC-32 mismatch |
-| `0x03` | `FTS_ERR_OUT_OF_SEQ` | Unexpected sequence number |
-| `0x04` | `FTS_ERR_ALLOC` | Memory allocation failure |
-| `0x05` | `FTS_ERR_SIZE` | File exceeds the 512 KB limit |
-| `0x06` | `FTS_ERR_BAD_STATE` | Command not valid in current state |
-| `0x07` | `FTS_ERR_TIMEOUT` | (reserved for future implementation) |
+function waitCtrl(codes, ms = 10000) {
+    return new Promise((res, rej) => {
+        ctrlResolve  = res;
+        ctrlReject   = rej;
+        ctrlExpected = codes;
+        ctrlTimer = setTimeout(() => {
+            ctrlResolve = null; ctrlReject = null;
+            rej(new Error(`Timeout esperando ${codes.map(c => '0x' + c.toString(16)).join(',')}`));
+        }, ms);
+    });
+}
 
----
+// ── Manejador de notificaciones de FTS_STATUS ─────────────────────────────────
+function onStatChanged(evt) {
+    const dv = evt.target.value;
+    if (dv.byteLength < 10) return;
+    const rxPkts  = dv.getUint16(1, true);
+    const totPkts = dv.getUint16(3, true);
+    const rxBytes = dv.getUint32(5, true);
+    updStats(rxPkts, totPkts, rxBytes);
+}
 
-## 6. Design Parameters
+// ── Conexión BLE ──────────────────────────────────────────────────────────────
+async function connectBLE() {
+    if (!navigator.bluetooth) {
+        log('✘ Este navegador no soporta Web Bluetooth. Usa Chrome/Edge.', 'le');
+        return;
+    }
+    try {
+        log('Searching for device with FTS service…');
+        bleDevice = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: 'EGO-CZ' }],
+            optionalServices: [FTS_SVC_UUID]
+        });
+        bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+        log(`Device: "${bleDevice.name || '(no name)'}"`,'lok');
 
-| Parameter | Value |
-|---|---|
-| Maximum file size | **512 KB** |
-| Storage | Dynamic heap; PSRAM if `CONFIG_SPIRAM` is enabled |
-| ACK window size | **20 packets** |
-| Per-packet CRC | CRC-16/CCITT-FALSE (poly=0x1021, init=0xFFFF, no reflection) |
-| Full-file CRC | CRC-32/ISO-HDLC — software implementation (poly=0xEDB88320, init=0xFFFFFFFF, xorout=0xFFFFFFFF) |
-| Recommended MTU | 247 bytes (BLE 4.2+ DLE) |
-| Useful payload per packet | `≤ MTU - 3 - 4` bytes (`≤ 240` bytes with MTU=247) |
-| Status notification | After CMD_START, each RESP_ACK, and at CMD_END |
+        const server = await bleDevice.gatt.connect();
+        log('GATT connected', 'lok');
 
-> **PSRAM note:** Without PSRAM enabled (`CONFIG_SPIRAM` undefined), the runtime heap has ~50–60 KB free. For files ≥ 64 KB, enabling PSRAM is recommended.
+        const svc = await server.getPrimaryService(FTS_SVC_UUID);
+        ctrlChar = await svc.getCharacteristic(FTS_CTRL_UUID);
+        dataChar = await svc.getCharacteristic(FTS_DATA_UUID);
+        statChar = await svc.getCharacteristic(FTS_STAT_UUID);
 
----
+        await ctrlChar.startNotifications();
+        ctrlChar.addEventListener('characteristicvaluechanged', onCtrlChanged);
 
-## 7. Implementation Notes
+        await statChar.startNotifications();
+        statChar.addEventListener('characteristicvaluechanged', onStatChanged);
 
-- The received file is available via `fts_get_file_buffer()` / `fts_get_file_size()` for the application layer.
-- Call `fts_release_buffer()` once the secondary bus has consumed the file.
-- If PSRAM is not enabled (`CONFIG_SPIRAM` undefined), `malloc()` is used from the internal heap.
-- FTS_DATA uses **Write Without Response** to maximise throughput; flow control is handled by the windowed ACK/NACK protocol over FTS_CONTROL.
-- The global CRC-32 uses a software implementation (`crc32_iso_hdlc`) instead of `esp_rom_crc32_le` because the ROM calling convention varies across ESP32 revisions and produces incorrect results with the standard polynomial.
-- Only **one file resides in RAM at a time**. A new `CMD_START` frees the previous buffer automatically.
-- The client must wait for the `RESP_ACK` indication before sending the next window.
-- The service does not require pairing/encryption; this can be added by modifying the flags in `gatt_svcs[]`.
+        document.getElementById('device-name').textContent =
+            bleDevice.name || '(no name)';
+        document.getElementById('btn-connect').disabled    = true;
+        document.getElementById('btn-disconnect').disabled = false;
+        setBadge('on');
+        refreshSendBtn();
+        log('✔ Ready. Select a file and start the transfer.', 'lok');
+    } catch (err) {
+        log(`✘ Connection: ${err.message}`, 'le');
+        bleDevice = null; ctrlChar = null; dataChar = null; statChar = null;
+        setBadge('off');
+        refreshSendBtn();
+    }
+}
 
+async function disconnectBLE() {
+    if (bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+}
+
+function onDisconnected() {
+    log('⚠ Device disconnected', 'lw');
+    ctrlChar = null; dataChar = null; statChar = null; bleDevice = null;
+    document.getElementById('btn-connect').disabled    = false;
+    document.getElementById('btn-disconnect').disabled = true;
+    document.getElementById('device-name').textContent = '—';
+    setBadge('off');
+    if (txActive) { txActive = false; setStatus('Disconnected during TX', 'err'); }
+    refreshSendBtn();
+}
+
+// ── Builders de paquetes ──────────────────────────────────────────────────────
+function buildCmdStart(fname, fileSize, totalPkts, destNode, crc32val) {
+    const buf = new ArrayBuffer(28);
+    const dv  = new DataView(buf);
+    const u8  = new Uint8Array(buf);
+    dv.setUint8(0, CMD_START);
+    const fnBytes = new TextEncoder().encode(fname).slice(0, 16);
+    u8.set(fnBytes, 1);                         // filename[16] null-padded
+    dv.setUint32(17, fileSize,   true);         // file_size LE
+    dv.setUint16(21, totalPkts,  true);         // total_pkts LE
+    dv.setUint8 (23, destNode);                 // dest_node
+    dv.setUint32(24, crc32val,   true);         // crc32_total LE
+    return buf;
+}
+
+function buildCmdEnd(crc32val) {
+    const buf = new ArrayBuffer(5);
+    const dv  = new DataView(buf);
+    dv.setUint8 (0, CMD_END);
+    dv.setUint32(1, crc32val, true);
+    return buf;
+}
+
+function buildCmdQuery() {
+    const buf = new ArrayBuffer(1);
+    new DataView(buf).setUint8(0, CMD_QUERY);
+    return buf;
+}
+
+function buildDataPkt(seqNum, payload) {
+    const c16  = crc16(payload);
+    const buf  = new ArrayBuffer(4 + payload.length);
+    const dv   = new DataView(buf);
+    const u8   = new Uint8Array(buf);
+    dv.setUint16(0, seqNum, true);   // seq_num LE
+    dv.setUint16(2, c16,    true);   // crc16 LE
+    u8.set(payload, 4);
+    return buf;
+}
+
+// ── Transferencia principal ───────────────────────────────────────────────────
+async function startTransfer() {
+    if (!ctrlChar || !fileBuffer || txActive) return;
+
+    const payloadSz = Math.max(16, Math.min(244, parseInt(document.getElementById('payload-size').value, 10)));
+    const destNode  = parseInt(document.getElementById('dest-node').value, 10) & 0xFF;
+    const pktDelay  = Math.max(0, parseInt(document.getElementById('pkt-delay').value, 10));
+
+    const fileBytes  = new Uint8Array(fileBuffer);
+    const fileSize   = fileBytes.length;
+    const totalPkts  = Math.ceil(fileSize / payloadSz);
+    const crc32val   = crc32(fileBuffer);
+
+    txActive = true;
+    retries  = 0;
+    refreshSendBtn();
+    document.getElementById('btn-abort').disabled = false;
+    setBadge('busy');
+    setProgress(0);
+    updStats(0, totalPkts, 0);
+
+    log(`▶ '${fileName}'  ${fmtBytes(fileSize)}  →  ${totalPkts} pkts  CRC32=0x${crc32val.toString(16).toUpperCase().padStart(8,'0')}`, 'li');
+    log(`  payload=${payloadSz}B  dest=0x${destNode.toString(16).padStart(2,'0')}  ventana=${WINDOW_SIZE}pkts  delay=${pktDelay}ms`, 'lm');
+
+    try {
+        // ─ CMD_START ─────────────────────────────────────────────────────────
+        // IMPORTANT: register waitCtrl BEFORE writing, because the firmware sends
+        // the READY indication from within the write callback — before the ATT
+        // write response — so the indication can arrive before
+        // writeValueWithResponse resolves.
+        setStatus('Sending CMD_START…');
+        const startCmd = buildCmdStart(fileName, fileSize, totalPkts, destNode, crc32val);
+        const rdyPromise = waitCtrl([RESP_READY], 8000);
+        await ctrlChar.writeValueWithResponse(startCmd);
+        log('► CMD_START sent', 'lm');
+
+        const rdy = await rdyPromise;
+        let nextPkt = rdy.dv.getUint16(1, true);
+        log(`◄ RESP_READY  next_pkt=${nextPkt}`, 'lok');
+
+        // ─ Window loop ───────────────────────────────────────────────────────
+        setStatus('Transferring data…');
+
+        while (nextPkt < totalPkts && txActive) {
+            const winEnd      = Math.min(nextPkt + WINDOW_SIZE, totalPkts);
+            const isFullWin   = (winEnd - nextPkt) === WINDOW_SIZE;
+            const isLastBatch = winEnd === totalPkts;
+
+            for (let i = nextPkt; i < winEnd; i++) {
+                if (!txActive) break;
+
+                const off     = i * payloadSz;
+                const payload = fileBytes.slice(off, Math.min(off + payloadSz, fileSize));
+                const pkt     = buildDataPkt(i, payload);
+
+                // Reintento por si la cola BLE está llena
+                let sent = false;
+                for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+                    try {
+                        await dataChar.writeValueWithoutResponse(pkt);
+                        sent = true;
+                    } catch (_) {
+                        await sleep(20);
+                    }
+                }
+                if (!sent) throw new Error(`Failed to send pkt #${i} after 3 attempts`);
+
+                if (pktDelay > 0) await sleep(pktDelay);
+
+                const progress = ((i + 1) / totalPkts) * 100;
+                setProgress(progress);
+                // Actualizar stats locales (STATUS notify puede llegar desfasado)
+                document.getElementById('stat-pkts').textContent  = `${i + 1} / ${totalPkts}`;
+                document.getElementById('stat-bytes').textContent = fmtBytes(Math.min((i + 1) * payloadSz, fileSize));
+            }
+
+            if (!txActive) break;
+
+            if (isLastBatch) {
+                // Wait for the firmware's final ACK (sent when all bytes are received).
+                // If it doesn't arrive (packets dropped), use CMD_QUERY (Write-With-Response)
+                // to synchronise: it arrives AFTER all queued WWNR data, so the response
+                // tells us the exact next_expected_pkt and we can retransmit missing packets.
+                let finalAckPkt = totalPkts; // assume OK until proven otherwise
+                try {
+                    const ack = await waitCtrl([RESP_ACK], 8000);
+                    finalAckPkt = ack.dv.getUint16(1, true);
+                    log(`◄ Final ACK — firmware at next_pkt=${finalAckPkt}`, 'lm');
+                } catch (_) {
+                    log('⚠ No final ACK — querying firmware state (CMD_QUERY)…', 'lw');
+                    try {
+                        const qPromise = waitCtrl([RESP_ACK, RESP_READY], 6000);
+                        await ctrlChar.writeValueWithResponse(buildCmdQuery());
+                        const qr = await qPromise;
+                        finalAckPkt = qr.dv.getUint16(1, true);
+                        log(`◄ QUERY → next_pkt=${finalAckPkt} (expected ${totalPkts})`, 'lw');
+                    } catch (qErr) {
+                        log(`✘ CMD_QUERY failed: ${qErr.message} — aborting`, 'le');
+                        throw qErr;
+                    }
+                }
+
+                if (finalAckPkt < totalPkts) {
+                    // Some packets were lost — retransmit from finalAckPkt and loop back
+                    log(`↩ Retransmitting from pkt#${finalAckPkt} (${totalPkts - finalAckPkt} packets lost)`, 'lw');
+                    retries++;
+                    document.getElementById('stat-retries').textContent = retries;
+                    nextPkt = finalAckPkt;
+                    continue;  // restart the while loop from the missing packet
+                }
+
+                break;   // All packets confirmed → proceed to CMD_END
+            }
+
+            // Ventana completa NO final → esperar ACK o NACK
+            const ack = await waitCtrl([RESP_ACK, RESP_NACK], 10000);
+            if (ack.resp === RESP_ACK) {
+                nextPkt = ack.dv.getUint16(1, true);
+                log(`◄ ACK  next=${nextPkt}`, 'lm');
+            } else {
+                const expPkt = ack.dv.getUint16(1, true);
+                const errCod = ack.dv.getUint8(3);
+                retries++;
+                document.getElementById('stat-retries').textContent = retries;
+                log(`◄ NACK  expected=${expPkt}  err=${ERR_NAME[errCod] || errCod}  → retransmitting`, 'lw');
+                nextPkt = expPkt;   // Retransmitir desde el paquete esperado
+            }
+        }
+
+        if (!txActive) {
+            log('⏹ Aborted by user', 'lw');
+            setStatus('Aborted', 'warn');
+            setProgress(0);
+            return;
+        }
+
+        // ─ CMD_END ───────────────────────────────────────────────────────────
+        // Same race-condition fix: register listener before sending.
+        setStatus('Verifying CRC-32…');
+        const endCmd = buildCmdEnd(crc32val);
+        const donePromise = waitCtrl([RESP_COMPLETE], 15000);
+        await ctrlChar.writeValueWithResponse(endCmd);
+        log(`► CMD_END  CRC32=0x${crc32val.toString(16).toUpperCase().padStart(8,'0')}`, 'lm');
+
+        const done = await donePromise;
+        const crcOk = done.dv.getUint8(1) === 1;
+
+        if (crcOk) {
+            setProgress(100, 'ok');
+            setStatus('✔ Complete — CRC correct', 'ok');
+            log('✔ RESP_COMPLETE — file stored correctly on the ESP32.', 'lok');
+        } else {
+            setProgress(100, 'err');
+            setStatus('✘ CRC-32 error', 'err');
+            log('✘ RESP_COMPLETE — CRC-32 mismatch. Reset and try again.', 'le');
+        }
+
+    } catch (err) {
+        log(`✘ ${err.message}`, 'le');
+        setStatus(`Error: ${err.message}`, 'err');
+        setProgress(0, 'err');
+    } finally {
+        txActive = false;
+        document.getElementById('btn-abort').disabled = true;
+        refreshSendBtn();
+        if (bleDevice && bleDevice.gatt.connected) setBadge('on');
+    }
+}
+
+async function abortTransfer() {
+    txActive = false;
+    if (!ctrlChar) return;
+    try {
+        await ctrlChar.writeValueWithResponse(new Uint8Array([CMD_ABORT]).buffer);
+        log('► CMD_ABORT', 'lw');
+    } catch (e) {
+        log(`Error sending ABORT: ${e.message}`, 'le');
+    }
+}
+
+// ── Query de estado del dispositivo ──────────────────────────────────────────
+async function queryStatus() {
+    if (!ctrlChar || txActive) return;
+    try {
+        const infoPromise = waitCtrl([RESP_ACK, RESP_READY, RESP_INFO], 6000);
+        await ctrlChar.writeValueWithResponse(buildCmdQuery());
+        const resp = await infoPromise;
+        const dv   = resp.dv;
+        if (resp.resp === RESP_INFO) {
+            const state     = dv.getUint8(1);
+            const fileSize  = dv.getUint32(2, true);
+            const bytesRecv = dv.getUint32(6, true);
+            const nameBytes = new Uint8Array(dv.buffer, dv.byteOffset + 10, 16);
+            const name      = new TextDecoder().decode(nameBytes).replace(/\0/g, '').trim() || '(none)';
+            const destNode  = dv.byteLength >= 27 ? dv.getUint8(26) : null;
+            const sname     = STATE_NAME[state] ?? `0x${state.toString(16)}`;
+            const nodeStr   = destNode !== null ? ` | dest_node: 0x${destNode.toString(16).padStart(2,'0')} (${destNode})` : '';
+            log(`◉ Buffer — state: ${sname} | file: '${name}' | size: ${fmtBytes(fileSize)} | received: ${fmtBytes(bytesRecv)}${nodeStr}`, 'lm');
+        } else if (resp.resp === RESP_ACK) {
+            const nextPkt = dv.getUint16(1, true);
+            log(`◉ Buffer — state: RECEIVING | next_pkt: ${nextPkt}`, 'lm');
+        } else {
+            log(`◉ Buffer — state: IDLE / Ready`, 'lm');
+        }
+    } catch (e) {
+        log(`✘ Query failed: ${e.message}`, 'le');
+    }
+}
+
+// ── Carga de fichero ──────────────────────────────────────────────────────────
+function loadFile(file) {
+    if (!file) return;
+    if (file.size > MAX_FILE_BYTES) {
+        log(`✘ File too large: ${fmtBytes(file.size)} (max 512 KB)`, 'le');
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = e => {
+        fileBuffer = e.target.result;
+        fileName   = file.name;
+        document.getElementById('file-info').textContent =
+            `📄 ${file.name}  ·  ${fmtBytes(file.size)}  ·  CRC32: 0x${crc32(fileBuffer).toString(16).toUpperCase().padStart(8,'0')}`;
+        log(`File loaded: '${file.name}'  ${fmtBytes(file.size)}`, 'lok');
+        refreshSendBtn();
+    };
+    reader.readAsArrayBuffer(file);
+}
+
+// ── Event listeners ───────────────────────────────────────────────────────────
+document.getElementById('btn-connect').addEventListener('click', connectBLE);
+document.getElementById('btn-disconnect').addEventListener('click', disconnectBLE);
+document.getElementById('btn-send').addEventListener('click', startTransfer);
+document.getElementById('btn-abort').addEventListener('click', abortTransfer);
+document.getElementById('btn-query').addEventListener('click', queryStatus);
+document.getElementById('btn-clear').addEventListener('click', () => document.getElementById('log').innerHTML = '');
+
+document.getElementById('file-input').addEventListener('change', e => loadFile(e.target.files[0]));
+
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
+dz.addEventListener('dragleave', ()  => dz.classList.remove('over'));
+dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.classList.remove('over');
+    loadFile(e.dataTransfer.files[0]);
+});
+
+// Initial check for Web Bluetooth availability
+if (!navigator.bluetooth) {
+    log('✘ Web Bluetooth not available in this browser. Use Chrome or Edge on desktop/Android.', 'le');
+    document.getElementById('btn-connect').disabled = true;
+} else {
+    log('Web Bluetooth available. Click "Connect" to search for the device.', 'lm');
+}
+</script>
+</body>
+</html>

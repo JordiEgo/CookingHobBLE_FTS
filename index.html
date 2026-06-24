@@ -247,6 +247,8 @@
         <div style="display:flex;gap:.65rem;margin-bottom:.85rem;flex-wrap:wrap;">
             <button class="btn btn-accent" id="btn-send"  disabled>&#x25B6; Start</button>
             <button class="btn btn-danger btn-sm" id="btn-abort" disabled>&#x23F9; Abort</button>
+            <button class="btn btn-ghost btn-sm"  id="btn-flash" disabled>&#x1F4BE; Write to Flash</button>
+            <button class="btn btn-ghost btn-sm"  id="btn-read"  disabled>&#x1F4E5; Read from Flash</button>
         </div>
 
         <div class="progress-wrap">
@@ -298,6 +300,8 @@ const CMD_START     = 0x01;
 const CMD_END       = 0x02;
 const CMD_ABORT     = 0x03;
 const CMD_QUERY     = 0x04;
+const CMD_FLASH     = 0x05;
+const CMD_READ_FLASH = 0x06;
 const RESP_READY    = 0x81;
 const RESP_ACK      = 0x82;
 const RESP_NACK     = 0x83;
@@ -308,9 +312,13 @@ const MAX_FILE_BYTES = 512 * 1024;
 
 const ERR_NAME = {
     0x00:'OK', 0x01:'CRC_PKT', 0x02:'CRC_FILE',
-    0x03:'OUT_OF_SEQ', 0x04:'ALLOC', 0x05:'SIZE', 0x06:'BAD_STATE'
+    0x03:'OUT_OF_SEQ', 0x04:'ALLOC', 0x05:'SIZE', 0x06:'BAD_STATE', 0x07:'FLASH', 0x08:'NO_DATA'
 };
-const RESP_INFO  = 0x86;
+const RESP_INFO        = 0x86;
+const RESP_FLASH_DONE  = 0x87;
+const RESP_READ_READY  = 0x88;
+const RESP_READ_DATA   = 0x89;
+const RESP_READ_DONE   = 0x8A;
 const STATE_NAME = { 0:'IDLE', 1:'RECEIVING', 2:'VERIFYING', 3:'DONE', 4:'ERROR' };
 
 // ── Estado global ─────────────────────────────────────────────────────────────
@@ -328,6 +336,13 @@ let ctrlResolve  = null;
 let ctrlReject   = null;
 let ctrlTimer    = null;
 let ctrlExpected = [];
+
+// Estado para lectura desde flash
+let readChunks  = [];   // Uint8Array por chunk
+let readTotal   = 0;    // bytes esperados (de RESP_READ_READY)
+let readCRC32   = 0;    // CRC-32 esperado
+let readName    = '';   // nombre de fichero
+let readActive  = false;
 
 // ── CRC-32/ISO-HDLC (= Ethernet/ZIP, poly reflej. 0xEDB88320) ─────────────
 // Coincide con: esp_rom_crc32_le(0xFFFFFFFF, buf, len) ^ 0xFFFFFFFF
@@ -416,6 +431,7 @@ function setBadge(state) {
 function refreshSendBtn() {
     document.getElementById('btn-send').disabled  = !(ctrlChar && fileBuffer && !txActive);
     document.getElementById('btn-query').disabled = !(ctrlChar && !txActive);
+    // btn-flash is managed explicitly by startTransfer() and flashToDevice()
 }
 
 // ── Manejador de indicaciones de FTS_CONTROL ──────────────────────────────────
@@ -423,7 +439,8 @@ function onCtrlChanged(evt) {
     const dv   = evt.target.value;
     const resp = dv.getUint8(0);
     const name = { 0x81:'READY', 0x82:'ACK', 0x83:'NACK',
-                   0x84:'COMPLETE', 0x85:'ERROR', 0x86:'INFO' }[resp] || `0x${resp.toString(16)}`;
+                   0x84:'COMPLETE', 0x85:'ERROR', 0x86:'INFO', 0x87:'FLASH_DONE',
+                   0x88:'READ_READY', 0x8A:'READ_DONE' }[resp] || `0x${resp.toString(16)}`;
 
     log(`◄ CTRL: ${name}`, 'lm');
 
@@ -463,8 +480,17 @@ function waitCtrl(codes, ms = 10000) {
 
 // ── Manejador de notificaciones de FTS_STATUS ─────────────────────────────────
 function onStatChanged(evt) {
-    const dv = evt.target.value;
-    if (dv.byteLength < 10) return;
+    const dv = evt.target.value;    if (dv.byteLength < 1) return;
+    // RESP_READ_DATA (0x89): opcode(1) + seq(2LE) + data — accumulate chunks
+    if (dv.getUint8(0) === RESP_READ_DATA) {
+        if (!readActive || dv.byteLength < 4) return;
+        const chunk = new Uint8Array(dv.buffer, dv.byteOffset + 3, dv.byteLength - 3);
+        readChunks.push(new Uint8Array(chunk));   // copy slice
+        const rxBytes = readChunks.reduce((s, c) => s + c.length, 0);
+        if (readTotal) setProgress(rxBytes / readTotal * 100);
+        return;
+    }
+    // Regular fts_status_t (10 bytes): state + rx_pkts(2) + tot_pkts(2) + bytes(4) + err    if (dv.byteLength < 10) return;
     const rxPkts  = dv.getUint16(1, true);
     const totPkts = dv.getUint16(3, true);
     const rxBytes = dv.getUint32(5, true);
@@ -507,6 +533,7 @@ async function connectBLE() {
         setBadge('on');
         refreshSendBtn();
         log('✔ Ready. Select a file and start the transfer.', 'lok');
+        document.getElementById('btn-read').disabled = false;
     } catch (err) {
         log(`✘ Connection: ${err.message}`, 'le');
         bleDevice = null; ctrlChar = null; dataChar = null; statChar = null;
@@ -528,15 +555,48 @@ function onDisconnected() {
     setBadge('off');
     if (txActive) { txActive = false; setStatus('Disconnected during TX', 'err'); }
     refreshSendBtn();
+    document.getElementById('btn-read').disabled = true;
+    document.getElementById('btn-flash').disabled = true;
 }
 
 // ── Builders de paquetes ──────────────────────────────────────────────────────
+
+/**
+ * Encode filename to at most maxBytes UTF-8 bytes, always preserving the
+ * file extension.  If stem+ext > maxBytes, the stem is truncated so that
+ * stem+ext fits exactly.  If the extension alone exceeds maxBytes it is
+ * itself truncated (edge case).
+ */
+function fitFilename(name, maxBytes) {
+    const enc = new TextEncoder();
+    if (enc.encode(name).length <= maxBytes) return name;
+    const dot = name.lastIndexOf('.');
+    if (dot === -1) {
+        // No extension — just truncate bytes, then walk back to valid UTF-8
+        let s = name;
+        while (enc.encode(s).length > maxBytes) s = s.slice(0, -1);
+        return s;
+    }
+    const ext = name.slice(dot);          // e.g. ".bin"
+    const extLen = enc.encode(ext).length;
+    if (extLen >= maxBytes) {
+        // Extension fills the whole field; truncate it too
+        let s = ext;
+        while (enc.encode(s).length > maxBytes) s = s.slice(0, -1);
+        return s;
+    }
+    let stem = name.slice(0, dot);
+    const stemMax = maxBytes - extLen;
+    while (enc.encode(stem).length > stemMax) stem = stem.slice(0, -1);
+    return stem + ext;
+}
+
 function buildCmdStart(fname, fileSize, totalPkts, destNode, crc32val) {
     const buf = new ArrayBuffer(28);
     const dv  = new DataView(buf);
     const u8  = new Uint8Array(buf);
     dv.setUint8(0, CMD_START);
-    const fnBytes = new TextEncoder().encode(fname).slice(0, 16);
+    const fnBytes = new TextEncoder().encode(fitFilename(fname, 15));  // 15 + '\0' = 16
     u8.set(fnBytes, 1);                         // filename[16] null-padded
     dv.setUint32(17, fileSize,   true);         // file_size LE
     dv.setUint16(21, totalPkts,  true);         // total_pkts LE
@@ -585,6 +645,7 @@ async function startTransfer() {
 
     txActive = true;
     retries  = 0;
+    let flashReady = false;
     refreshSendBtn();
     document.getElementById('btn-abort').disabled = false;
     setBadge('busy');
@@ -721,6 +782,7 @@ async function startTransfer() {
             setProgress(100, 'ok');
             setStatus('✔ Complete — CRC correct', 'ok');
             log('✔ RESP_COMPLETE — file stored correctly on the ESP32.', 'lok');
+            flashReady = true;
         } else {
             setProgress(100, 'err');
             setStatus('✘ CRC-32 error', 'err');
@@ -735,6 +797,7 @@ async function startTransfer() {
         txActive = false;
         document.getElementById('btn-abort').disabled = true;
         refreshSendBtn();
+        document.getElementById('btn-flash').disabled = !flashReady;
         if (bleDevice && bleDevice.gatt.connected) setBadge('on');
     }
 }
@@ -747,6 +810,31 @@ async function abortTransfer() {
         log('► CMD_ABORT', 'lw');
     } catch (e) {
         log(`Error sending ABORT: ${e.message}`, 'le');
+    }
+}
+
+// ── Escritura en flash ─────────────────────────────────────────────────────
+async function flashToDevice() {
+    if (!ctrlChar) return;
+    document.getElementById('btn-flash').disabled = true;
+    log('\u25b6 CMD_FLASH — writing RAM buffer to flash storage partition…', 'lm');
+    try {
+        const buf = new ArrayBuffer(1);
+        new DataView(buf).setUint8(0, 0x05);  // CMD_FLASH
+        const donePromise = waitCtrl([RESP_FLASH_DONE], 30000);
+        await ctrlChar.writeValueWithResponse(buf);
+        const resp = await donePromise;
+        const result    = resp.dv.getUint8(1);
+        if (result === 0x00) {
+            const written = resp.dv.byteLength >= 6 ? resp.dv.getUint32(2, true) : 0;
+            log(`\u2714 Written to flash: ${fmtBytes(written)}`, 'lok');
+        } else {
+            log(`\u2718 Flash write failed: ${ERR_NAME[result] || '0x' + result.toString(16)}`, 'le');
+            document.getElementById('btn-flash').disabled = false;  // allow retry
+        }
+    } catch (e) {
+        log(`\u2718 CMD_FLASH error: ${e.message}`, 'le');
+        document.getElementById('btn-flash').disabled = false;
     }
 }
 
@@ -779,6 +867,72 @@ async function queryStatus() {
     }
 }
 
+// ── Lectura desde flash ───────────────────────────────────────────────────────
+async function readFromFlash() {
+    if (!ctrlChar) return;
+    document.getElementById('btn-read').disabled = true;
+    readChunks = []; readTotal = 0; readCRC32 = 0; readName = ''; readActive = false;
+    setProgress(0);
+    log('► CMD_READ_FLASH — requesting file from flash…', 'lm');
+    try {
+        // Register waitCtrl BEFORE sending so we don't miss the fast indication
+        const readyPromise = waitCtrl([RESP_READ_READY], 8000);
+        const buf = new ArrayBuffer(1);
+        new DataView(buf).setUint8(0, CMD_READ_FLASH);
+        await ctrlChar.writeValueWithResponse(buf);
+
+        const { dv: rdv } = await readyPromise;
+        // RESP_READ_READY: opcode(1) + file_size(4LE) + crc32(4LE) + dest_node(1) + filename(16)
+        readTotal   = rdv.getUint32(1, true);
+        readCRC32   = rdv.getUint32(5, true);
+        const destNode  = rdv.getUint8(9);
+        const nameBytes = new Uint8Array(rdv.buffer, rdv.byteOffset + 10, 16);
+        readName = new TextDecoder().decode(nameBytes).replace(/\0/g, '').trim();
+        log(`◄ READ_READY: "${readName}" dest_node=${destNode} size=${fmtBytes(readTotal)} CRC=0x${readCRC32.toString(16).toUpperCase().padStart(8,'0')}`, 'lm');
+        setStatus(`Receiving "${readName}"…`, '');
+
+        // Enable chunk accumulation and wait for RESP_READ_DONE
+        readActive = true;
+        const donePromise = waitCtrl([RESP_READ_DONE], 120000);
+        const { dv: ddv } = await donePromise;
+        readActive = false;
+
+        const totalChunks = ddv.getUint16(1, true);
+        const totalBytes  = ddv.getUint32(3, true);
+
+        // Reassemble chunks into a single Uint8Array
+        const assembled = new Uint8Array(totalBytes);
+        let pos = 0;
+        for (const c of readChunks) { assembled.set(c, pos); pos += c.length; }
+        log(`◄ READ_DONE: ${totalChunks} chunks, ${fmtBytes(totalBytes)}`, 'lm');
+
+        // Verify CRC-32
+        const calcCrc = crc32(assembled.buffer);
+        if (calcCrc === readCRC32) {
+            log(`✔ CRC-32 OK (0x${calcCrc.toString(16).toUpperCase().padStart(8,'0')})`, 'lok');
+            setStatus('✔ Read OK — CRC match', 'ok');
+            setProgress(100);
+            // Offer as browser download
+            const blob = new Blob([assembled], { type: 'application/octet-stream' });
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement('a');
+            a.href = url; a.download = readName || 'flash_dump.bin'; a.click();
+            URL.revokeObjectURL(url);
+        } else {
+            log(`✘ CRC-32 mismatch: calc=0x${calcCrc.toString(16).toUpperCase().padStart(8,'0')} expected=0x${readCRC32.toString(16).toUpperCase().padStart(8,'0')}`, 'le');
+            setStatus('✘ CRC-32 mismatch', 'err');
+            setProgress(100, 'err');
+        }
+    } catch (err) {
+        readActive = false;
+        log(`✘ ${err.message}`, 'le');
+        setStatus(`Error: ${err.message}`, 'err');
+        setProgress(0, 'err');
+    } finally {
+        document.getElementById('btn-read').disabled = !(ctrlChar && !txActive);
+    }
+}
+
 // ── Carga de fichero ──────────────────────────────────────────────────────────
 function loadFile(file) {
     if (!file) return;
@@ -804,6 +958,8 @@ document.getElementById('btn-disconnect').addEventListener('click', disconnectBL
 document.getElementById('btn-send').addEventListener('click', startTransfer);
 document.getElementById('btn-abort').addEventListener('click', abortTransfer);
 document.getElementById('btn-query').addEventListener('click', queryStatus);
+document.getElementById('btn-flash').addEventListener('click', flashToDevice);
+document.getElementById('btn-read').addEventListener('click', readFromFlash);
 document.getElementById('btn-clear').addEventListener('click', () => document.getElementById('log').innerHTML = '');
 
 document.getElementById('file-input').addEventListener('change', e => loadFile(e.target.files[0]));

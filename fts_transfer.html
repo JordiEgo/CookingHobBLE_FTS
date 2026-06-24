@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTS — BLE File Transfer Client</title>
+    <style>
+        :root {
+            --bg:      #0d1117;
+            --surface: #161b22;
+            --card:    #1c2128;
+            --border:  #30363d;
+            --text:    #e6edf3;
+            --muted:   #7d8590;
+            --accent:  #00b4d8;
+            --success: #3fb950;
+            --warning: #d29922;
+            --error:   #f85149;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 1.5rem 1rem;
+        }
+
+        .header { text-align: center; margin-bottom: 2rem; }
+        .header h1 { font-size: 1.7rem; color: var(--accent); letter-spacing: -0.02em; }
+        .header p  { color: var(--muted); font-size: 0.82rem; margin-top: 0.3rem; }
+
+        .layout {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            max-width: 920px;
+            margin: 0 auto;
+        }
+        @media (max-width: 640px) { .layout { grid-template-columns: 1fr; } }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.1rem 1.25rem;
+        }
+        .card.span2 { grid-column: 1 / -1; }
+
+        .card-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--muted);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Badge */
+        .badge {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+        }
+        .badge-off  { background: rgba(248,81,73,.15); color: var(--error); }
+        .badge-on   { background: rgba(63,185,80,.15); color: var(--success); }
+        .badge-busy { background: rgba(210,153,34,.15); color: var(--warning); }
+
+        /* Buttons */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            padding: 0.55rem 1.1rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: filter .15s, transform .1s;
+            white-space: nowrap;
+        }
+        .btn:hover:not(:disabled) { filter: brightness(1.12); transform: translateY(-1px); }
+        .btn:active:not(:disabled) { transform: translateY(0); }
+        .btn:disabled { opacity: .35; cursor: not-allowed; }
+        .btn-accent   { background: var(--accent);  color: #000; }
+        .btn-danger   { background: var(--error);   color: #fff; }
+        .btn-ghost    { background: var(--card);    color: var(--text); border: 1px solid var(--border); }
+        .btn-sm       { padding: .35rem .75rem; font-size: .78rem; }
+
+        /* Form */
+        .fgroup { margin-bottom: .85rem; }
+        .fgroup:last-child { margin-bottom: 0; }
+        label { display: block; font-size: .75rem; color: var(--muted); margin-bottom: .3rem; }
+        input[type=number] {
+            width: 100%;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: .45rem .7rem;
+            color: var(--text);
+            font-size: .88rem;
+        }
+        input[type=number]:focus { outline: none; border-color: var(--accent); }
+        .row { display: flex; gap: .75rem; }
+        .row .fgroup { flex: 1; margin-bottom: 0; }
+
+        /* File drop */
+        .drop-zone {
+            border: 2px dashed var(--border);
+            border-radius: 10px;
+            padding: 1.5rem 1rem;
+            text-align: center;
+            cursor: pointer;
+            position: relative;
+            transition: border-color .2s, background .2s;
+        }
+        .drop-zone:hover, .drop-zone.over {
+            border-color: var(--accent);
+            background: rgba(0,180,216,.05);
+        }
+        .drop-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; }
+        .drop-icon { font-size: 2.2rem; margin-bottom: .5rem; }
+        .drop-hint { color: var(--muted); font-size: .82rem; line-height: 1.5; }
+        .drop-file { color: var(--accent); font-weight: 600; font-size: .9rem; margin-top: .5rem; }
+
+        /* Progress */
+        .progress-wrap { margin: .75rem 0 .3rem; }
+        .progress-bar  { height: 8px; background: var(--card); border-radius: 999px; overflow: hidden; }
+        .progress-fill {
+            height: 100%; border-radius: 999px; width: 0%;
+            background: linear-gradient(90deg, var(--accent), #90e0ef);
+            transition: width .25s ease;
+        }
+        .progress-fill.ok  { background: var(--success); }
+        .progress-fill.err { background: var(--error); }
+        .progress-meta { display: flex; justify-content: space-between; font-size: .75rem; color: var(--muted); margin-top: .3rem; }
+
+        /* Stats */
+        .stats { display: grid; grid-template-columns: repeat(3,1fr); gap: .65rem; margin-top: .85rem; }
+        .stat  { background: var(--card); border-radius: 8px; padding: .55rem; text-align: center; }
+        .stat-val { font-size: 1.15rem; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+        .stat-lbl { font-size: .68rem; color: var(--muted); margin-top: .15rem; }
+
+        /* Log */
+        .log {
+            background: #010409;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: .65rem .8rem;
+            height: 190px;
+            overflow-y: auto;
+            font-family: 'Cascadia Code', 'Consolas', 'Monaco', monospace;
+            font-size: .76rem;
+            line-height: 1.55;
+        }
+        .log::-webkit-scrollbar { width: 6px; }
+        .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        .le { }
+        .li { color: var(--text); }
+        .lok { color: var(--success); }
+        .lw  { color: var(--warning); }
+        .le  { color: var(--error); }
+        .lm  { color: var(--muted); }
+
+        /* Inline row */
+        .inline { display: flex; align-items: center; gap: .7rem; margin-bottom: .85rem; flex-wrap: wrap; }
+        .device-name { font-size: .9rem; color: var(--text); flex: 1; min-width: 0;
+                       overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Alert */
+        .alert { padding: .55rem .8rem; border-radius: 7px; font-size: .78rem; margin-top: .75rem; line-height: 1.5; }
+        .alert-w { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.4); color: var(--warning); }
+        .alert-i { background: rgba(0,180,216,.1);  border: 1px solid rgba(0,180,216,.4);  color: var(--accent); }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>FTS — BLE File Transfer</h1>
+    <p>File Transfer Service v1.0 &nbsp;·&nbsp; Requires Chrome / Edge with Web Bluetooth API enabled</p>
+</div>
+
+<div class="layout">
+
+    <!-- ── Conexión ─────────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-title">
+            Connection
+            <span id="badge" class="badge badge-off">Disconnected</span>
+        </div>
+        <div class="inline">
+            <div class="device-name" id="device-name">—</div>
+        </div>
+        <div style="display:flex;gap:.65rem;flex-wrap:wrap;">
+            <button class="btn btn-accent" id="btn-connect">&#x1F517; Connect</button>
+            <button class="btn btn-ghost"  id="btn-disconnect" disabled>Disconnect</button>
+            <button class="btn btn-ghost btn-sm" id="btn-query" disabled>&#x1F50D; Query</button>
+        </div>
+    </div>
+
+    <!-- ── Configuración ────────────────────────────────────── -->
+    <div class="card">
+        <div class="card-title">&#x2699;&#xFE0F; Settings</div>
+        <div class="row">
+            <div class="fgroup">
+                <label>Destination node (0–255)</label>
+                <input type="number" id="dest-node" value="1" min="0" max="255">
+            </div>
+            <div class="fgroup">
+                <label>Payload per packet (bytes)</label>
+                <input type="number" id="payload-size" value="240" min="16" max="244">
+            </div>
+        </div>
+        <div class="fgroup" style="margin-top:.85rem;">
+            <label>Inter-packet delay (ms) — increase if packet loss occurs</label>
+            <input type="number" id="pkt-delay" value="5" min="0" max="100">
+        </div>
+        <div class="alert alert-i">
+            &#x1F4A1; Payload 240 B requires DLE (MTU 247). If repeated NACKs occur, try 20 B.
+        </div>
+    </div>
+
+    <!-- ── Fichero ───────────────────────────────────────────── -->
+    <div class="card span2">
+        <div class="card-title">&#x1F4C1; File to Transfer</div>
+        <div class="drop-zone" id="drop-zone">
+            <input type="file" id="file-input" accept=".hex,.bin,.fw,.img,.srec">
+            <div class="drop-icon">&#x1F4C2;</div>
+            <div class="drop-hint">
+                Drag a file here or click to select<br>
+                <small>Formats: .hex · .bin · .fw · .img · .srec &nbsp;|&nbsp; Maximum: 512 KB</small>
+            </div>
+            <div class="drop-file" id="file-info"></div>
+        </div>
+    </div>
+
+    <!-- ── Transferencia ────────────────────────────────────── -->
+    <div class="card span2">
+        <div class="card-title">Transfer</div>
+        <div style="display:flex;gap:.65rem;margin-bottom:.85rem;flex-wrap:wrap;">
+            <button class="btn btn-accent" id="btn-send"  disabled>&#x25B6; Start</button>
+            <button class="btn btn-danger btn-sm" id="btn-abort" disabled>&#x23F9; Abort</button>
+            <button class="btn btn-ghost btn-sm"  id="btn-flash" disabled>&#x1F4BE; Write to Flash</button>
+            <button class="btn btn-ghost btn-sm"  id="btn-read"  disabled>&#x1F4E5; Read from Flash</button>
+        </div>
+
+        <div class="progress-wrap">
+            <div class="progress-bar"><div class="progress-fill" id="prog-fill"></div></div>
+            <div class="progress-meta">
+                <span id="prog-pct">0 %</span>
+                <span id="prog-status">—</span>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat">
+                <div class="stat-val" id="stat-pkts">—</div>
+                <div class="stat-lbl">Packets</div>
+            </div>
+            <div class="stat">
+                <div class="stat-val" id="stat-bytes">—</div>
+                <div class="stat-lbl">Bytes received</div>
+            </div>
+            <div class="stat">
+                <div class="stat-val" id="stat-retries">0</div>
+                <div class="stat-lbl">Retransmissions</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── Log ──────────────────────────────────────────────── -->
+    <div class="card span2">
+        <div class="card-title" style="justify-content:space-between;">
+            <span>&#x1F5A5;&#xFE0F; Log</span>
+            <button class="btn btn-ghost btn-sm" id="btn-clear">Clear</button>
+        </div>
+        <div class="log" id="log"></div>
+    </div>
+
+</div><!-- /layout -->
+
+<script>
+'use strict';
+
+// ── UUIDs del servicio FTS ────────────────────────────────────────────────────
+const FTS_SVC_UUID  = 'fa000001-fdb8-11ee-be56-0242ac120002';
+const FTS_CTRL_UUID = 'fa000002-fdb8-11ee-be56-0242ac120002';
+const FTS_DATA_UUID = 'fa000003-fdb8-11ee-be56-0242ac120002';
+const FTS_STAT_UUID = 'fa000004-fdb8-11ee-be56-0242ac120002';
+
+// ── Constantes de protocolo ───────────────────────────────────────────────────
+const CMD_START     = 0x01;
+const CMD_END       = 0x02;
+const CMD_ABORT     = 0x03;
+const CMD_QUERY     = 0x04;
+const CMD_FLASH     = 0x05;
+const CMD_READ_FLASH = 0x06;
+const RESP_READY    = 0x81;
+const RESP_ACK      = 0x82;
+const RESP_NACK     = 0x83;
+const RESP_COMPLETE = 0x84;
+const RESP_ERROR    = 0x85;
+const WINDOW_SIZE   = 20;
+const MAX_FILE_BYTES = 512 * 1024;
+
+const ERR_NAME = {
+    0x00:'OK', 0x01:'CRC_PKT', 0x02:'CRC_FILE',
+    0x03:'OUT_OF_SEQ', 0x04:'ALLOC', 0x05:'SIZE', 0x06:'BAD_STATE', 0x07:'FLASH', 0x08:'NO_DATA'
+};
+const RESP_INFO        = 0x86;
+const RESP_FLASH_DONE  = 0x87;
+const RESP_READ_READY  = 0x88;
+const RESP_READ_DATA   = 0x89;
+const RESP_READ_DONE   = 0x8A;
+const STATE_NAME = { 0:'IDLE', 1:'RECEIVING', 2:'VERIFYING', 3:'DONE', 4:'ERROR' };
+
+// ── Estado global ─────────────────────────────────────────────────────────────
+let bleDevice   = null;
+let ctrlChar    = null;
+let dataChar    = null;
+let statChar    = null;
+let fileBuffer  = null;   // ArrayBuffer
+let fileName    = '';
+let txActive    = false;
+let retries     = 0;
+
+// Resolvers para respuestas de control (promise-based)
+let ctrlResolve  = null;
+let ctrlReject   = null;
+let ctrlTimer    = null;
+let ctrlExpected = [];
+
+// Estado para lectura desde flash
+let readChunks  = [];   // Uint8Array por chunk
+let readTotal   = 0;    // bytes esperados (de RESP_READ_READY)
+let readCRC32   = 0;    // CRC-32 esperado
+let readName    = '';   // nombre de fichero
+let readActive  = false;
+
+// ── CRC-32/ISO-HDLC (= Ethernet/ZIP, poly reflej. 0xEDB88320) ─────────────
+// Coincide con: esp_rom_crc32_le(0xFFFFFFFF, buf, len) ^ 0xFFFFFFFF
+const CRC32 = (() => {
+    const T = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+        let c = i;
+        for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        T[i] = c;
+    }
+    return T;
+})();
+
+function crc32(data) {
+    const b = new Uint8Array(data);
+    let c = 0xFFFFFFFF;
+    for (const x of b) c = CRC32[(c ^ x) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// ── CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, sin reflexión) ─────────────
+function crc16(data) {
+    let c = 0xFFFF;
+    for (const b of data) {
+        c ^= (b << 8) & 0xFFFF;
+        for (let i = 0; i < 8; i++)
+            c = (c & 0x8000) ? (((c << 1) ^ 0x1021) & 0xFFFF) : ((c << 1) & 0xFFFF);
+    }
+    return c;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1048576).toFixed(2) + ' MB';
+}
+
+function ts() {
+    const d = new Date();
+    return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+// ── Log ──────────────────────────────────────────────────────────────────────
+function log(msg, cls = 'li') {
+    const el   = document.getElementById('log');
+    const line = document.createElement('div');
+    line.className = cls;
+    line.textContent = `[${ts()}] ${msg}`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+}
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function setStatus(text, kind = '') {
+    const el = document.getElementById('prog-status');
+    el.textContent = text;
+    el.style.color = kind === 'ok'   ? 'var(--success)' :
+                     kind === 'err'  ? 'var(--error)'   :
+                     kind === 'warn' ? 'var(--warning)'  : 'var(--muted)';
+}
+
+function setProgress(pct, cls = '') {
+    const fill = document.getElementById('prog-fill');
+    fill.style.width  = Math.min(pct, 100).toFixed(1) + '%';
+    fill.className    = 'progress-fill' + (cls ? ' ' + cls : '');
+    document.getElementById('prog-pct').textContent = Math.min(pct, 100).toFixed(1) + ' %';
+}
+
+function updStats(rxPkts, totPkts, rxBytes) {
+    document.getElementById('stat-pkts').textContent =
+        totPkts ? `${rxPkts} / ${totPkts}` : (rxPkts !== undefined ? rxPkts : '—');
+    document.getElementById('stat-bytes').textContent  = rxBytes ? fmtBytes(rxBytes) : '—';
+    document.getElementById('stat-retries').textContent = retries;
+}
+
+function setBadge(state) {
+    const el = document.getElementById('badge');
+    if (state === 'on')   { el.textContent = 'Connected';    el.className = 'badge badge-on'; }
+    if (state === 'off')  { el.textContent = 'Disconnected'; el.className = 'badge badge-off'; }
+    if (state === 'busy') { el.textContent = 'Transferring';  el.className = 'badge badge-busy'; }
+}
+
+function refreshSendBtn() {
+    document.getElementById('btn-send').disabled  = !(ctrlChar && fileBuffer && !txActive);
+    document.getElementById('btn-query').disabled = !(ctrlChar && !txActive);
+    // btn-flash is managed explicitly by startTransfer() and flashToDevice()
+}
+
+// ── Manejador de indicaciones de FTS_CONTROL ──────────────────────────────────
+function onCtrlChanged(evt) {
+    const dv   = evt.target.value;
+    const resp = dv.getUint8(0);
+    const name = { 0x81:'READY', 0x82:'ACK', 0x83:'NACK',
+                   0x84:'COMPLETE', 0x85:'ERROR', 0x86:'INFO', 0x87:'FLASH_DONE',
+                   0x88:'READ_READY', 0x8A:'READ_DONE' }[resp] || `0x${resp.toString(16)}`;
+
+    log(`◄ CTRL: ${name}`, 'lm');
+
+    if (!ctrlResolve) return;
+
+    if (ctrlExpected.includes(resp)) {
+        clearTimeout(ctrlTimer);
+        const res = ctrlResolve;
+        ctrlResolve = null; ctrlReject = null;
+        res({ resp, dv });
+    } else if (resp === RESP_ERROR) {
+        clearTimeout(ctrlTimer);
+        const errCode = dv.byteLength > 1 ? dv.getUint8(1) : 0xFF;
+        let msg = `FTS_ERROR ${ERR_NAME[errCode] || '0x' + errCode.toString(16)}`;
+        if (errCode === 0x04 && dv.byteLength >= 6) {
+            const freeBytes = dv.getUint32(2, true);
+            msg += ` — device RAM available: ${fmtBytes(freeBytes)}`;
+        }
+        const rej = ctrlReject;
+        ctrlResolve = null; ctrlReject = null;
+        rej(new Error(msg));
+    }
+    // Respuestas inesperadas (ej. ACK residual mientras esperamos COMPLETE) → ignorar
+}
+
+function waitCtrl(codes, ms = 10000) {
+    return new Promise((res, rej) => {
+        ctrlResolve  = res;
+        ctrlReject   = rej;
+        ctrlExpected = codes;
+        ctrlTimer = setTimeout(() => {
+            ctrlResolve = null; ctrlReject = null;
+            rej(new Error(`Timeout esperando ${codes.map(c => '0x' + c.toString(16)).join(',')}`));
+        }, ms);
+    });
+}
+
+// ── Manejador de notificaciones de FTS_STATUS ─────────────────────────────────
+function onStatChanged(evt) {
+    const dv = evt.target.value;    if (dv.byteLength < 1) return;
+    // RESP_READ_DATA (0x89): opcode(1) + seq(2LE) + data — accumulate chunks
+    if (dv.getUint8(0) === RESP_READ_DATA) {
+        if (!readActive || dv.byteLength < 4) return;
+        const chunk = new Uint8Array(dv.buffer, dv.byteOffset + 3, dv.byteLength - 3);
+        readChunks.push(new Uint8Array(chunk));   // copy slice
+        const rxBytes = readChunks.reduce((s, c) => s + c.length, 0);
+        if (readTotal) setProgress(rxBytes / readTotal * 100);
+        return;
+    }
+    // Regular fts_status_t (10 bytes): state + rx_pkts(2) + tot_pkts(2) + bytes(4) + err    if (dv.byteLength < 10) return;
+    const rxPkts  = dv.getUint16(1, true);
+    const totPkts = dv.getUint16(3, true);
+    const rxBytes = dv.getUint32(5, true);
+    updStats(rxPkts, totPkts, rxBytes);
+}
+
+// ── Conexión BLE ──────────────────────────────────────────────────────────────
+async function connectBLE() {
+    if (!navigator.bluetooth) {
+        log('✘ Este navegador no soporta Web Bluetooth. Usa Chrome/Edge.', 'le');
+        return;
+    }
+    try {
+        log('Searching for device with FTS service…');
+        bleDevice = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: 'EGO-CZ' }],
+            optionalServices: [FTS_SVC_UUID]
+        });
+        bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+        log(`Device: "${bleDevice.name || '(no name)'}"`,'lok');
+
+        const server = await bleDevice.gatt.connect();
+        log('GATT connected', 'lok');
+
+        const svc = await server.getPrimaryService(FTS_SVC_UUID);
+        ctrlChar = await svc.getCharacteristic(FTS_CTRL_UUID);
+        dataChar = await svc.getCharacteristic(FTS_DATA_UUID);
+        statChar = await svc.getCharacteristic(FTS_STAT_UUID);
+
+        await ctrlChar.startNotifications();
+        ctrlChar.addEventListener('characteristicvaluechanged', onCtrlChanged);
+
+        await statChar.startNotifications();
+        statChar.addEventListener('characteristicvaluechanged', onStatChanged);
+
+        document.getElementById('device-name').textContent =
+            bleDevice.name || '(no name)';
+        document.getElementById('btn-connect').disabled    = true;
+        document.getElementById('btn-disconnect').disabled = false;
+        setBadge('on');
+        refreshSendBtn();
+        log('✔ Ready. Select a file and start the transfer.', 'lok');
+        document.getElementById('btn-read').disabled = false;
+    } catch (err) {
+        log(`✘ Connection: ${err.message}`, 'le');
+        bleDevice = null; ctrlChar = null; dataChar = null; statChar = null;
+        setBadge('off');
+        refreshSendBtn();
+    }
+}
+
+async function disconnectBLE() {
+    if (bleDevice && bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+}
+
+function onDisconnected() {
+    log('⚠ Device disconnected', 'lw');
+    ctrlChar = null; dataChar = null; statChar = null; bleDevice = null;
+    document.getElementById('btn-connect').disabled    = false;
+    document.getElementById('btn-disconnect').disabled = true;
+    document.getElementById('device-name').textContent = '—';
+    setBadge('off');
+    if (txActive) { txActive = false; setStatus('Disconnected during TX', 'err'); }
+    refreshSendBtn();
+    document.getElementById('btn-read').disabled = true;
+    document.getElementById('btn-flash').disabled = true;
+}
+
+// ── Builders de paquetes ──────────────────────────────────────────────────────
+
+/**
+ * Encode filename to at most maxBytes UTF-8 bytes, always preserving the
+ * file extension.  If stem+ext > maxBytes, the stem is truncated so that
+ * stem+ext fits exactly.  If the extension alone exceeds maxBytes it is
+ * itself truncated (edge case).
+ */
+function fitFilename(name, maxBytes) {
+    const enc = new TextEncoder();
+    if (enc.encode(name).length <= maxBytes) return name;
+    const dot = name.lastIndexOf('.');
+    if (dot === -1) {
+        // No extension — just truncate bytes, then walk back to valid UTF-8
+        let s = name;
+        while (enc.encode(s).length > maxBytes) s = s.slice(0, -1);
+        return s;
+    }
+    const ext = name.slice(dot);          // e.g. ".bin"
+    const extLen = enc.encode(ext).length;
+    if (extLen >= maxBytes) {
+        // Extension fills the whole field; truncate it too
+        let s = ext;
+        while (enc.encode(s).length > maxBytes) s = s.slice(0, -1);
+        return s;
+    }
+    let stem = name.slice(0, dot);
+    const stemMax = maxBytes - extLen;
+    while (enc.encode(stem).length > stemMax) stem = stem.slice(0, -1);
+    return stem + ext;
+}
+
+function buildCmdStart(fname, fileSize, totalPkts, destNode, crc32val) {
+    const buf = new ArrayBuffer(28);
+    const dv  = new DataView(buf);
+    const u8  = new Uint8Array(buf);
+    dv.setUint8(0, CMD_START);
+    const fnBytes = new TextEncoder().encode(fitFilename(fname, 15));  // 15 + '\0' = 16
+    u8.set(fnBytes, 1);                         // filename[16] null-padded
+    dv.setUint32(17, fileSize,   true);         // file_size LE
+    dv.setUint16(21, totalPkts,  true);         // total_pkts LE
+    dv.setUint8 (23, destNode);                 // dest_node
+    dv.setUint32(24, crc32val,   true);         // crc32_total LE
+    return buf;
+}
+
+function buildCmdEnd(crc32val) {
+    const buf = new ArrayBuffer(5);
+    const dv  = new DataView(buf);
+    dv.setUint8 (0, CMD_END);
+    dv.setUint32(1, crc32val, true);
+    return buf;
+}
+
+function buildCmdQuery() {
+    const buf = new ArrayBuffer(1);
+    new DataView(buf).setUint8(0, CMD_QUERY);
+    return buf;
+}
+
+function buildDataPkt(seqNum, payload) {
+    const c16  = crc16(payload);
+    const buf  = new ArrayBuffer(4 + payload.length);
+    const dv   = new DataView(buf);
+    const u8   = new Uint8Array(buf);
+    dv.setUint16(0, seqNum, true);   // seq_num LE
+    dv.setUint16(2, c16,    true);   // crc16 LE
+    u8.set(payload, 4);
+    return buf;
+}
+
+// ── Transferencia principal ───────────────────────────────────────────────────
+async function startTransfer() {
+    if (!ctrlChar || !fileBuffer || txActive) return;
+
+    const payloadSz = Math.max(16, Math.min(244, parseInt(document.getElementById('payload-size').value, 10)));
+    const destNode  = parseInt(document.getElementById('dest-node').value, 10) & 0xFF;
+    const pktDelay  = Math.max(0, parseInt(document.getElementById('pkt-delay').value, 10));
+
+    const fileBytes  = new Uint8Array(fileBuffer);
+    const fileSize   = fileBytes.length;
+    const totalPkts  = Math.ceil(fileSize / payloadSz);
+    const crc32val   = crc32(fileBuffer);
+
+    txActive = true;
+    retries  = 0;
+    let flashReady = false;
+    refreshSendBtn();
+    document.getElementById('btn-abort').disabled = false;
+    setBadge('busy');
+    setProgress(0);
+    updStats(0, totalPkts, 0);
+
+    log(`▶ '${fileName}'  ${fmtBytes(fileSize)}  →  ${totalPkts} pkts  CRC32=0x${crc32val.toString(16).toUpperCase().padStart(8,'0')}`, 'li');
+    log(`  payload=${payloadSz}B  dest=0x${destNode.toString(16).padStart(2,'0')}  ventana=${WINDOW_SIZE}pkts  delay=${pktDelay}ms`, 'lm');
+
+    try {
+        // ─ CMD_START ─────────────────────────────────────────────────────────
+        // IMPORTANT: register waitCtrl BEFORE writing, because the firmware sends
+        // the READY indication from within the write callback — before the ATT
+        // write response — so the indication can arrive before
+        // writeValueWithResponse resolves.
+        setStatus('Sending CMD_START…');
+        const startCmd = buildCmdStart(fileName, fileSize, totalPkts, destNode, crc32val);
+        const rdyPromise = waitCtrl([RESP_READY], 8000);
+        await ctrlChar.writeValueWithResponse(startCmd);
+        log('► CMD_START sent', 'lm');
+
+        const rdy = await rdyPromise;
+        let nextPkt = rdy.dv.getUint16(1, true);
+        log(`◄ RESP_READY  next_pkt=${nextPkt}`, 'lok');
+
+        // ─ Window loop ───────────────────────────────────────────────────────
+        setStatus('Transferring data…');
+
+        while (nextPkt < totalPkts && txActive) {
+            const winEnd      = Math.min(nextPkt + WINDOW_SIZE, totalPkts);
+            const isFullWin   = (winEnd - nextPkt) === WINDOW_SIZE;
+            const isLastBatch = winEnd === totalPkts;
+
+            for (let i = nextPkt; i < winEnd; i++) {
+                if (!txActive) break;
+
+                const off     = i * payloadSz;
+                const payload = fileBytes.slice(off, Math.min(off + payloadSz, fileSize));
+                const pkt     = buildDataPkt(i, payload);
+
+                // Reintento por si la cola BLE está llena
+                let sent = false;
+                for (let attempt = 0; attempt < 3 && !sent; attempt++) {
+                    try {
+                        await dataChar.writeValueWithoutResponse(pkt);
+                        sent = true;
+                    } catch (_) {
+                        await sleep(20);
+                    }
+                }
+                if (!sent) throw new Error(`Failed to send pkt #${i} after 3 attempts`);
+
+                if (pktDelay > 0) await sleep(pktDelay);
+
+                const progress = ((i + 1) / totalPkts) * 100;
+                setProgress(progress);
+                // Actualizar stats locales (STATUS notify puede llegar desfasado)
+                document.getElementById('stat-pkts').textContent  = `${i + 1} / ${totalPkts}`;
+                document.getElementById('stat-bytes').textContent = fmtBytes(Math.min((i + 1) * payloadSz, fileSize));
+            }
+
+            if (!txActive) break;
+
+            if (isLastBatch) {
+                // Wait for the firmware's final ACK (sent when all bytes are received).
+                // If it doesn't arrive (packets dropped), use CMD_QUERY (Write-With-Response)
+                // to synchronise: it arrives AFTER all queued WWNR data, so the response
+                // tells us the exact next_expected_pkt and we can retransmit missing packets.
+                let finalAckPkt = totalPkts; // assume OK until proven otherwise
+                try {
+                    const ack = await waitCtrl([RESP_ACK], 8000);
+                    finalAckPkt = ack.dv.getUint16(1, true);
+                    log(`◄ Final ACK — firmware at next_pkt=${finalAckPkt}`, 'lm');
+                } catch (_) {
+                    log('⚠ No final ACK — querying firmware state (CMD_QUERY)…', 'lw');
+                    try {
+                        const qPromise = waitCtrl([RESP_ACK, RESP_READY], 6000);
+                        await ctrlChar.writeValueWithResponse(buildCmdQuery());
+                        const qr = await qPromise;
+                        finalAckPkt = qr.dv.getUint16(1, true);
+                        log(`◄ QUERY → next_pkt=${finalAckPkt} (expected ${totalPkts})`, 'lw');
+                    } catch (qErr) {
+                        log(`✘ CMD_QUERY failed: ${qErr.message} — aborting`, 'le');
+                        throw qErr;
+                    }
+                }
+
+                if (finalAckPkt < totalPkts) {
+                    // Some packets were lost — retransmit from finalAckPkt and loop back
+                    log(`↩ Retransmitting from pkt#${finalAckPkt} (${totalPkts - finalAckPkt} packets lost)`, 'lw');
+                    retries++;
+                    document.getElementById('stat-retries').textContent = retries;
+                    nextPkt = finalAckPkt;
+                    continue;  // restart the while loop from the missing packet
+                }
+
+                break;   // All packets confirmed → proceed to CMD_END
+            }
+
+            // Ventana completa NO final → esperar ACK o NACK
+            const ack = await waitCtrl([RESP_ACK, RESP_NACK], 10000);
+            if (ack.resp === RESP_ACK) {
+                nextPkt = ack.dv.getUint16(1, true);
+                log(`◄ ACK  next=${nextPkt}`, 'lm');
+            } else {
+                const expPkt = ack.dv.getUint16(1, true);
+                const errCod = ack.dv.getUint8(3);
+                retries++;
+                document.getElementById('stat-retries').textContent = retries;
+                log(`◄ NACK  expected=${expPkt}  err=${ERR_NAME[errCod] || errCod}  → retransmitting`, 'lw');
+                nextPkt = expPkt;   // Retransmitir desde el paquete esperado
+            }
+        }
+
+        if (!txActive) {
+            log('⏹ Aborted by user', 'lw');
+            setStatus('Aborted', 'warn');
+            setProgress(0);
+            return;
+        }
+
+        // ─ CMD_END ───────────────────────────────────────────────────────────
+        // Same race-condition fix: register listener before sending.
+        setStatus('Verifying CRC-32…');
+        const endCmd = buildCmdEnd(crc32val);
+        const donePromise = waitCtrl([RESP_COMPLETE], 15000);
+        await ctrlChar.writeValueWithResponse(endCmd);
+        log(`► CMD_END  CRC32=0x${crc32val.toString(16).toUpperCase().padStart(8,'0')}`, 'lm');
+
+        const done = await donePromise;
+        const crcOk = done.dv.getUint8(1) === 1;
+
+        if (crcOk) {
+            setProgress(100, 'ok');
+            setStatus('✔ Complete — CRC correct', 'ok');
+            log('✔ RESP_COMPLETE — file stored correctly on the ESP32.', 'lok');
+            flashReady = true;
+        } else {
+            setProgress(100, 'err');
+            setStatus('✘ CRC-32 error', 'err');
+            log('✘ RESP_COMPLETE — CRC-32 mismatch. Reset and try again.', 'le');
+        }
+
+    } catch (err) {
+        log(`✘ ${err.message}`, 'le');
+        setStatus(`Error: ${err.message}`, 'err');
+        setProgress(0, 'err');
+    } finally {
+        txActive = false;
+        document.getElementById('btn-abort').disabled = true;
+        refreshSendBtn();
+        document.getElementById('btn-flash').disabled = !flashReady;
+        if (bleDevice && bleDevice.gatt.connected) setBadge('on');
+    }
+}
+
+async function abortTransfer() {
+    txActive = false;
+    if (!ctrlChar) return;
+    try {
+        await ctrlChar.writeValueWithResponse(new Uint8Array([CMD_ABORT]).buffer);
+        log('► CMD_ABORT', 'lw');
+    } catch (e) {
+        log(`Error sending ABORT: ${e.message}`, 'le');
+    }
+}
+
+// ── Escritura en flash ─────────────────────────────────────────────────────
+async function flashToDevice() {
+    if (!ctrlChar) return;
+    document.getElementById('btn-flash').disabled = true;
+    log('\u25b6 CMD_FLASH — writing RAM buffer to flash storage partition…', 'lm');
+    try {
+        const buf = new ArrayBuffer(1);
+        new DataView(buf).setUint8(0, 0x05);  // CMD_FLASH
+        const donePromise = waitCtrl([RESP_FLASH_DONE], 30000);
+        await ctrlChar.writeValueWithResponse(buf);
+        const resp = await donePromise;
+        const result    = resp.dv.getUint8(1);
+        if (result === 0x00) {
+            const written = resp.dv.byteLength >= 6 ? resp.dv.getUint32(2, true) : 0;
+            log(`\u2714 Written to flash: ${fmtBytes(written)}`, 'lok');
+        } else {
+            log(`\u2718 Flash write failed: ${ERR_NAME[result] || '0x' + result.toString(16)}`, 'le');
+            document.getElementById('btn-flash').disabled = false;  // allow retry
+        }
+    } catch (e) {
+        log(`\u2718 CMD_FLASH error: ${e.message}`, 'le');
+        document.getElementById('btn-flash').disabled = false;
+    }
+}
+
+// ── Query de estado del dispositivo ──────────────────────────────────────────
+async function queryStatus() {
+    if (!ctrlChar || txActive) return;
+    try {
+        const infoPromise = waitCtrl([RESP_ACK, RESP_READY, RESP_INFO], 6000);
+        await ctrlChar.writeValueWithResponse(buildCmdQuery());
+        const resp = await infoPromise;
+        const dv   = resp.dv;
+        if (resp.resp === RESP_INFO) {
+            const state     = dv.getUint8(1);
+            const fileSize  = dv.getUint32(2, true);
+            const bytesRecv = dv.getUint32(6, true);
+            const nameBytes = new Uint8Array(dv.buffer, dv.byteOffset + 10, 16);
+            const name      = new TextDecoder().decode(nameBytes).replace(/\0/g, '').trim() || '(none)';
+            const destNode  = dv.byteLength >= 27 ? dv.getUint8(26) : null;
+            const sname     = STATE_NAME[state] ?? `0x${state.toString(16)}`;
+            const nodeStr   = destNode !== null ? ` | dest_node: 0x${destNode.toString(16).padStart(2,'0')} (${destNode})` : '';
+            log(`◉ Buffer — state: ${sname} | file: '${name}' | size: ${fmtBytes(fileSize)} | received: ${fmtBytes(bytesRecv)}${nodeStr}`, 'lm');
+        } else if (resp.resp === RESP_ACK) {
+            const nextPkt = dv.getUint16(1, true);
+            log(`◉ Buffer — state: RECEIVING | next_pkt: ${nextPkt}`, 'lm');
+        } else {
+            log(`◉ Buffer — state: IDLE / Ready`, 'lm');
+        }
+    } catch (e) {
+        log(`✘ Query failed: ${e.message}`, 'le');
+    }
+}
+
+// ── Lectura desde flash ───────────────────────────────────────────────────────
+async function readFromFlash() {
+    if (!ctrlChar) return;
+    document.getElementById('btn-read').disabled = true;
+    readChunks = []; readTotal = 0; readCRC32 = 0; readName = ''; readActive = false;
+    setProgress(0);
+    log('► CMD_READ_FLASH — requesting file from flash…', 'lm');
+    try {
+        // Register waitCtrl BEFORE sending so we don't miss the fast indication
+        const readyPromise = waitCtrl([RESP_READ_READY], 8000);
+        const buf = new ArrayBuffer(1);
+        new DataView(buf).setUint8(0, CMD_READ_FLASH);
+        await ctrlChar.writeValueWithResponse(buf);
+
+        const { dv: rdv } = await readyPromise;
+        // RESP_READ_READY: opcode(1) + file_size(4LE) + crc32(4LE) + dest_node(1) + filename(16)
+        readTotal   = rdv.getUint32(1, true);
+        readCRC32   = rdv.getUint32(5, true);
+        const destNode  = rdv.getUint8(9);
+        const nameBytes = new Uint8Array(rdv.buffer, rdv.byteOffset + 10, 16);
+        readName = new TextDecoder().decode(nameBytes).replace(/\0/g, '').trim();
+        log(`◄ READ_READY: "${readName}" dest_node=${destNode} size=${fmtBytes(readTotal)} CRC=0x${readCRC32.toString(16).toUpperCase().padStart(8,'0')}`, 'lm');
+        setStatus(`Receiving "${readName}"…`, '');
+
+        // Enable chunk accumulation and wait for RESP_READ_DONE
+        readActive = true;
+        const donePromise = waitCtrl([RESP_READ_DONE], 120000);
+        const { dv: ddv } = await donePromise;
+        readActive = false;
+
+        const totalChunks = ddv.getUint16(1, true);
+        const totalBytes  = ddv.getUint32(3, true);
+
+        // Reassemble chunks into a single Uint8Array
+        const assembled = new Uint8Array(totalBytes);
+        let pos = 0;
+        for (const c of readChunks) { assembled.set(c, pos); pos += c.length; }
+        log(`◄ READ_DONE: ${totalChunks} chunks, ${fmtBytes(totalBytes)}`, 'lm');
+
+        // Verify CRC-32
+        const calcCrc = crc32(assembled.buffer);
+        if (calcCrc === readCRC32) {
+            log(`✔ CRC-32 OK (0x${calcCrc.toString(16).toUpperCase().padStart(8,'0')})`, 'lok');
+            setStatus('✔ Read OK — CRC match', 'ok');
+            setProgress(100);
+            // Offer as browser download
+            const blob = new Blob([assembled], { type: 'application/octet-stream' });
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement('a');
+            a.href = url; a.download = readName || 'flash_dump.bin'; a.click();
+            URL.revokeObjectURL(url);
+        } else {
+            log(`✘ CRC-32 mismatch: calc=0x${calcCrc.toString(16).toUpperCase().padStart(8,'0')} expected=0x${readCRC32.toString(16).toUpperCase().padStart(8,'0')}`, 'le');
+            setStatus('✘ CRC-32 mismatch', 'err');
+            setProgress(100, 'err');
+        }
+    } catch (err) {
+        readActive = false;
+        log(`✘ ${err.message}`, 'le');
+        setStatus(`Error: ${err.message}`, 'err');
+        setProgress(0, 'err');
+    } finally {
+        document.getElementById('btn-read').disabled = !(ctrlChar && !txActive);
+    }
+}
+
+// ── Carga de fichero ──────────────────────────────────────────────────────────
+function loadFile(file) {
+    if (!file) return;
+    if (file.size > MAX_FILE_BYTES) {
+        log(`✘ File too large: ${fmtBytes(file.size)} (max 512 KB)`, 'le');
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = e => {
+        fileBuffer = e.target.result;
+        fileName   = file.name;
+        document.getElementById('file-info').textContent =
+            `📄 ${file.name}  ·  ${fmtBytes(file.size)}  ·  CRC32: 0x${crc32(fileBuffer).toString(16).toUpperCase().padStart(8,'0')}`;
+        log(`File loaded: '${file.name}'  ${fmtBytes(file.size)}`, 'lok');
+        refreshSendBtn();
+    };
+    reader.readAsArrayBuffer(file);
+}
+
+// ── Event listeners ───────────────────────────────────────────────────────────
+document.getElementById('btn-connect').addEventListener('click', connectBLE);
+document.getElementById('btn-disconnect').addEventListener('click', disconnectBLE);
+document.getElementById('btn-send').addEventListener('click', startTransfer);
+document.getElementById('btn-abort').addEventListener('click', abortTransfer);
+document.getElementById('btn-query').addEventListener('click', queryStatus);
+document.getElementById('btn-flash').addEventListener('click', flashToDevice);
+document.getElementById('btn-read').addEventListener('click', readFromFlash);
+document.getElementById('btn-clear').addEventListener('click', () => document.getElementById('log').innerHTML = '');
+
+document.getElementById('file-input').addEventListener('change', e => loadFile(e.target.files[0]));
+
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover',  e => { e.preventDefault(); dz.classList.add('over'); });
+dz.addEventListener('dragleave', ()  => dz.classList.remove('over'));
+dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.classList.remove('over');
+    loadFile(e.dataTransfer.files[0]);
+});
+
+// Initial check for Web Bluetooth availability
+if (!navigator.bluetooth) {
+    log('✘ Web Bluetooth not available in this browser. Use Chrome or Edge on desktop/Android.', 'le');
+    document.getElementById('btn-connect').disabled = true;
+} else {
+    log('Web Bluetooth available. Click "Connect" to search for the device.', 'lm');
+}
+</script>
+</body>
+</html>
